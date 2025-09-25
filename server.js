@@ -29,7 +29,7 @@ let currentGoogleKeyIndex = 0;
 let currentSearchEngineIndex = 0;
 const googleKeyUsage = new Map(); // Suivre l'utilisation des clés
 const GOOGLE_DAILY_LIMIT = 100; // Limite par clé par jour
-const GOOGLE_RETRY_DELAY = 1000; // Délai entre les tentatives
+const GOOGLE_RETRY_DELAY = 5000; // Délai entre les tentatives (augmenté pour éviter 429)
 
 // Mémoire du bot (stockage local temporaire + sauvegarde permanente GitHub)
 const userMemory = new Map();
@@ -225,8 +225,8 @@ async function googleSearch(query, numResults = 5) {
     try {
         log.info(`🔍 Recherche Google avec clé ${keyIndex}/${engineIndex}: "${query.substring(0, 50)}..."`);
         
-        // ✅ CORRECTION: Ajouter un délai pour éviter le rate limiting
-        await sleep(500);
+        // ✅ CORRECTION: Ajouter un délai pour éviter le rate limiting (augmenté à 1000ms)
+        await sleep(1000);
         
         const response = await axios.get('https://www.googleapis.com/customsearch/v1', {
             params: {
@@ -286,42 +286,52 @@ async function googleSearch(query, numResults = 5) {
                 }
             } else if (status === 429) {
                 log.warning(`⚠️ Rate limit Google avec clé ${keyIndex}/${engineIndex}, retry avec délai plus long...`);
-                await sleep(GOOGLE_RETRY_DELAY * 3); // ✅ CORRECTION: Délai plus long pour 429
                 
-                // ✅ CORRECTION: Une seule retry pour éviter les boucles infinies
-                try {
-                    const retryResponse = await axios.get('https://www.googleapis.com/customsearch/v1', {
-                        params: {
-                            key: apiKey,
-                            cx: searchEngineId,
-                            q: query,
-                            num: Math.min(numResults, 10),
-                            safe: 'active',
-                            lr: 'lang_fr',
-                            gl: 'fr'
-                        },
-                        timeout: 20000
-                    });
-                    
-                    if (retryResponse.status === 200 && retryResponse.data.items) {
-                        updateGoogleKeyUsage(keyId, keyIndex, engineIndex, true);
+                // ✅ AMÉLIORATION: Boucle de retry avec backoff exponentiel (jusqu'à 3 tentatives)
+                let retrySuccess = false;
+                let retryDelay = GOOGLE_RETRY_DELAY;
+                for (let retryAttempt = 1; retryAttempt <= 3; retryAttempt++) {
+                    await sleep(retryDelay);
+                    try {
+                        const retryResponse = await axios.get('https://www.googleapis.com/customsearch/v1', {
+                            params: {
+                                key: apiKey,
+                                cx: searchEngineId,
+                                q: query,
+                                num: Math.min(numResults, 10),
+                                safe: 'active',
+                                lr: 'lang_fr',
+                                gl: 'fr'
+                            },
+                            timeout: 20000
+                        });
                         
-                        const results = retryResponse.data.items.map(item => ({
-                            title: item.title,
-                            link: item.link,
-                            snippet: item.snippet,
-                            displayLink: item.displayLink
-                        }));
-                        
-                        log.info(`✅ ${results.length} résultats Google trouvés avec clé ${keyIndex}/${engineIndex} (retry)`);
-                        return results;
+                        if (retryResponse.status === 200 && retryResponse.data.items) {
+                            updateGoogleKeyUsage(keyId, keyIndex, engineIndex, true);
+                            
+                            const results = retryResponse.data.items.map(item => ({
+                                title: item.title,
+                                link: item.link,
+                                snippet: item.snippet,
+                                displayLink: item.displayLink
+                            }));
+                            
+                            log.info(`✅ ${results.length} résultats Google trouvés avec clé ${keyIndex}/${engineIndex} (retry ${retryAttempt})`);
+                            retrySuccess = true;
+                            return results;
+                        }
+                    } catch (retryError) {
+                        log.warning(`⚠️ Échec retry ${retryAttempt} pour clé ${keyIndex}/${engineIndex}: ${retryError.message}`);
+                        retryDelay *= 2; // Backoff exponentiel
                     }
-                } catch (retryError) {
-                    log.error(`❌ Erreur retry Google: ${retryError.message}`);
+                }
+                
+                if (!retrySuccess) {
                     // Essayer la clé suivante si disponible
                     const totalCombinations = GOOGLE_API_KEYS.length * GOOGLE_SEARCH_ENGINE_IDS.length;
                     if (totalCombinations > 1) {
                         log.info("🔄 Tentative avec clé suivante après rate limit...");
+                        await sleep(1000); // Délai supplémentaire avant de switcher
                         return await googleSearch(query, numResults);
                     }
                 }
