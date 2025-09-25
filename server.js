@@ -150,29 +150,32 @@ function getNextGoogleKey() {
     
     const today = new Date().toDateString();
     
-    // Essayer toutes les combinaisons de clés/moteurs
-    for (let keyAttempt = 0; keyAttempt < GOOGLE_API_KEYS.length; keyAttempt++) {
-        for (let engineAttempt = 0; engineAttempt < GOOGLE_SEARCH_ENGINE_IDS.length; engineAttempt++) {
-            const keyIndex = (currentGoogleKeyIndex + keyAttempt) % GOOGLE_API_KEYS.length;
-            const engineIndex = (currentSearchEngineIndex + engineAttempt) % GOOGLE_SEARCH_ENGINE_IDS.length;
-            
-            const apiKey = GOOGLE_API_KEYS[keyIndex];
-            const searchEngineId = GOOGLE_SEARCH_ENGINE_IDS[engineIndex];
-            const keyId = `${keyIndex}-${engineIndex}-${today}`;
-            
-            const usage = googleKeyUsage.get(keyId) || 0;
-            
-            if (usage < GOOGLE_DAILY_LIMIT) {
-                log.debug(`🔑 Utilisation clé Google ${keyIndex}/${engineIndex}: ${usage}/${GOOGLE_DAILY_LIMIT}`);
-                return {
-                    apiKey,
-                    searchEngineId,
-                    keyIndex,
-                    engineIndex,
-                    keyId,
-                    usage
-                };
-            }
+    // ✅ CORRECTION: Essayer toutes les combinaisons sans distinction de taille
+    const totalKeys = GOOGLE_API_KEYS.length;
+    const totalEngines = GOOGLE_SEARCH_ENGINE_IDS.length;
+    const totalCombinations = totalKeys * totalEngines;
+    
+    // Essayer toutes les combinaisons possibles
+    for (let attempt = 0; attempt < totalCombinations; attempt++) {
+        const keyIndex = (currentGoogleKeyIndex + Math.floor(attempt / totalEngines)) % totalKeys;
+        const engineIndex = (currentSearchEngineIndex + (attempt % totalEngines)) % totalEngines;
+        
+        const apiKey = GOOGLE_API_KEYS[keyIndex];
+        const searchEngineId = GOOGLE_SEARCH_ENGINE_IDS[engineIndex];
+        const keyId = `${keyIndex}-${engineIndex}-${today}`;
+        
+        const usage = googleKeyUsage.get(keyId) || 0;
+        
+        if (usage < GOOGLE_DAILY_LIMIT) {
+            log.debug(`🔑 Utilisation clé Google ${keyIndex}/${engineIndex}: ${usage}/${GOOGLE_DAILY_LIMIT}`);
+            return {
+                apiKey,
+                searchEngineId,
+                keyIndex,
+                engineIndex,
+                keyId,
+                usage
+            };
         }
     }
     
@@ -222,6 +225,9 @@ async function googleSearch(query, numResults = 5) {
     try {
         log.info(`🔍 Recherche Google avec clé ${keyIndex}/${engineIndex}: "${query.substring(0, 50)}..."`);
         
+        // ✅ CORRECTION: Ajouter un délai pour éviter le rate limiting
+        await sleep(500);
+        
         const response = await axios.get('https://www.googleapis.com/customsearch/v1', {
             params: {
                 key: apiKey,
@@ -232,7 +238,7 @@ async function googleSearch(query, numResults = 5) {
                 lr: 'lang_fr', // Priorité au français
                 gl: 'fr' // Géolocalisation France
             },
-            timeout: 10000
+            timeout: 15000 // ✅ CORRECTION: Timeout plus long
         });
         
         if (response.status === 200 && response.data.items) {
@@ -263,11 +269,15 @@ async function googleSearch(query, numResults = 5) {
                     // Marquer cette clé comme épuisée
                     googleKeyUsage.set(keyId, GOOGLE_DAILY_LIMIT);
                     
-                    // Essayer avec la clé suivante
-                    if (GOOGLE_API_KEYS.length > 1 || GOOGLE_SEARCH_ENGINE_IDS.length > 1) {
+                    // ✅ CORRECTION: Essayer avec la clé suivante SEULEMENT s'il y en a d'autres
+                    const totalCombinations = GOOGLE_API_KEYS.length * GOOGLE_SEARCH_ENGINE_IDS.length;
+                    if (totalCombinations > 1) {
                         log.info("🔄 Tentative avec clé suivante...");
                         await sleep(GOOGLE_RETRY_DELAY);
                         return await googleSearch(query, numResults);
+                    } else {
+                        log.warning("⚠️ Une seule combinaison clé/moteur disponible et épuisée");
+                        return null;
                     }
                 } else if (errorData.error?.errors?.[0]?.reason === 'keyInvalid') {
                     log.error(`❌ Clé Google API invalide ${keyIndex}/${engineIndex}`);
@@ -275,9 +285,47 @@ async function googleSearch(query, numResults = 5) {
                     log.error(`❌ Erreur Google API 403 avec clé ${keyIndex}/${engineIndex}: ${JSON.stringify(errorData)}`);
                 }
             } else if (status === 429) {
-                log.warning(`⚠️ Rate limit Google avec clé ${keyIndex}/${engineIndex}, retry...`);
-                await sleep(GOOGLE_RETRY_DELAY * 2);
-                return await googleSearch(query, numResults);
+                log.warning(`⚠️ Rate limit Google avec clé ${keyIndex}/${engineIndex}, retry avec délai plus long...`);
+                await sleep(GOOGLE_RETRY_DELAY * 3); // ✅ CORRECTION: Délai plus long pour 429
+                
+                // ✅ CORRECTION: Une seule retry pour éviter les boucles infinies
+                try {
+                    const retryResponse = await axios.get('https://www.googleapis.com/customsearch/v1', {
+                        params: {
+                            key: apiKey,
+                            cx: searchEngineId,
+                            q: query,
+                            num: Math.min(numResults, 10),
+                            safe: 'active',
+                            lr: 'lang_fr',
+                            gl: 'fr'
+                        },
+                        timeout: 20000
+                    });
+                    
+                    if (retryResponse.status === 200 && retryResponse.data.items) {
+                        updateGoogleKeyUsage(keyId, keyIndex, engineIndex, true);
+                        
+                        const results = retryResponse.data.items.map(item => ({
+                            title: item.title,
+                            link: item.link,
+                            snippet: item.snippet,
+                            displayLink: item.displayLink
+                        }));
+                        
+                        log.info(`✅ ${results.length} résultats Google trouvés avec clé ${keyIndex}/${engineIndex} (retry)`);
+                        return results;
+                    }
+                } catch (retryError) {
+                    log.error(`❌ Erreur retry Google: ${retryError.message}`);
+                    // Essayer la clé suivante si disponible
+                    const totalCombinations = GOOGLE_API_KEYS.length * GOOGLE_SEARCH_ENGINE_IDS.length;
+                    if (totalCombinations > 1) {
+                        log.info("🔄 Tentative avec clé suivante après rate limit...");
+                        return await googleSearch(query, numResults);
+                    }
+                }
+                return null;
             } else {
                 log.error(`❌ Erreur Google API ${status} avec clé ${keyIndex}/${engineIndex}: ${error.message}`);
             }
@@ -290,13 +338,19 @@ async function googleSearch(query, numResults = 5) {
     }
 }
 
-// ✅ RECHERCHE WEB AMÉLIORÉE avec Google Search API + fallback Mistral
+// ✅ RECHERCHE WEB AMÉLIORÉE avec Google Search API + fallback Mistral + gestion rate limiting
 async function webSearch(query) {
     if (!query || typeof query !== 'string') {
         return "Oh non ! Je n'ai pas compris ta recherche... 🤔";
     }
     
     try {
+        // ✅ CORRECTION: Vérifier si Google Search est disponible avant d'essayer
+        if (GOOGLE_API_KEYS.length === 0 || GOOGLE_SEARCH_ENGINE_IDS.length === 0) {
+            log.info(`🔄 Google Search non configuré, utilisation de Mistral pour: "${query}"`);
+            return await fallbackMistralSearch(query);
+        }
+        
         // Essayer d'abord avec Google Search API
         const googleResults = await googleSearch(query, 5);
         
@@ -317,27 +371,43 @@ async function webSearch(query) {
             response += "\n💡 Besoin de plus d'infos ? N'hésite pas à me poser des questions ! 💕";
             return response;
         } else {
-            // Fallback avec Mistral si Google ne fonctionne pas
-            log.info(`🔄 Fallback Mistral pour recherche: "${query}"`);
-            
-            const searchContext = `Recherche web pour '${query}' en 2025. Je peux répondre avec mes connaissances de 2025.`;
-            const messages = [{
-                role: "system",
-                content: `Tu es NakamaBot, une assistante IA très gentille et amicale qui aide avec les recherches. Nous sommes en 2025. Réponds à cette recherche: '${query}' avec tes connaissances de 2025. Si tu ne sais pas, dis-le gentiment. Réponds en français avec une personnalité amicale et bienveillante, maximum 400 caractères.`
-            }];
-            
-            const mistralResult = await callMistralAPI(messages, 200, 0.3);
-            
-            if (mistralResult) {
-                return `🤖 Voici ce que je sais sur "${query}" :\n\n${mistralResult}\n\n💕 (Recherche basée sur mes connaissances - Pour des infos plus récentes, réessaie plus tard !)`;
-            } else {
-                return `😔 Désolée, je n'arrive pas à trouver d'infos sur "${query}" pour le moment... Réessaie plus tard ? 💕`;
-            }
+            // ✅ CORRECTION: Fallback propre vers Mistral
+            log.info(`🔄 Google Search échoué, fallback Mistral pour: "${query}"`);
+            return await fallbackMistralSearch(query);
         }
         
     } catch (error) {
         log.error(`❌ Erreur recherche complète: ${error.message}`);
+        
+        // ✅ CORRECTION: Si erreur 429, passer directement au fallback
+        if (error.response?.status === 429) {
+            log.info(`🔄 Rate limit détecté, utilisation du fallback Mistral pour: "${query}"`);
+            return await fallbackMistralSearch(query);
+        }
+        
         return "Oh non ! Une petite erreur de recherche... Désolée ! 💕";
+    }
+}
+
+// ✅ NOUVELLE FONCTION: Fallback Mistral séparée pour éviter la duplication
+async function fallbackMistralSearch(query) {
+    try {
+        const searchContext = `Recherche web pour '${query}' en 2025. Je peux répondre avec mes connaissances de 2025.`;
+        const messages = [{
+            role: "system",
+            content: `Tu es NakamaBot, une assistante IA très gentille et amicale qui aide avec les recherches. Nous sommes en 2025. Réponds à cette recherche: '${query}' avec tes connaissances de 2025. Si tu ne sais pas, dis-le gentiment. Réponds en français avec une personnalité amicale et bienveillante, maximum 400 caractères.`
+        }];
+        
+        const mistralResult = await callMistralAPI(messages, 200, 0.3);
+        
+        if (mistralResult) {
+            return `🤖 Voici ce que je sais sur "${query}" :\n\n${mistralResult}\n\n💕 (Recherche basée sur mes connaissances - Pour des infos plus récentes, réessaie plus tard !)`;
+        } else {
+            return `😔 Désolée, je n'arrive pas à trouver d'infos sur "${query}" pour le moment... Réessaie plus tard ? 💕`;
+        }
+    } catch (error) {
+        log.error(`❌ Erreur fallback Mistral: ${error.message}`);
+        return `😔 Désolée, impossible de rechercher "${query}" maintenant... Réessaie plus tard ? 💕`;
     }
 }
 
