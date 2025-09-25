@@ -1,0 +1,104 @@
+{
+  "name": "nakamabot-drive",
+  "version": "4.0.0",
+  "description": "NakamaBot - Assistante IA super gentille et amicale avec sauvegarde Google Drive permanente",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "nodemon server.js",
+    "postinstall": "npm rebuild sqlite3",
+    "build": "npm install --build-from-source",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "chatbot",
+    "facebook-messenger",
+    "ai",
+    "mistral",
+    "google-drive",
+    "nakamabot",
+    "friendly-ai",
+    "image-analysis",
+    "anime-transformation"
+  ],
+  "author": {
+    "name": "Durand",
+    "description": "Créateur de NakamaBot - L'assistante IA la plus gentille"
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=16.0.0",
+    "npm": ">=8.0.0"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "axios": "^1.6.2",
+    "body-parser": "^1.20.2",
+    "googleapis": "^129.0.0",
+    "sanitize-filename": "^1.6.3",
+    "youtube-search-api": "^1.1.6",
+    "@distube/ytdl-core": "^4.13.5",
+    "cloudinary": "^1.41.0",
+    "cheerio": "^1.0.0",
+    "sqlite3": "^5.1.7",
+    "@google/generative-ai": "^0.24.1",
+    "sharp": "^0.33.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.2"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/your-username/nakamabot-drive.git"
+  },
+  "bugs": {
+    "url": "https://github.com/your-username/nakamabot-drive/issues"
+  },
+  "homepage": "https://github.com/your-username/nakamabot-drive#readme",
+  "config": {
+    "personality": "Super gentille et amicale, comme une très bonne amie",
+    "version_name": "Amicale + Vision + Drive",
+    "year": "2025",
+    "creator": "Durand"
+  },
+  "features": [
+    "Génération d'images IA avec Mistral",
+    "Transformation d'images en style anime",
+    "Analyse d'images avec Vision IA",
+    "Chat intelligent et conversationnel",
+    "Sauvegarde permanente Google Drive",
+    "Mémoire persistante des conversations",
+    "Commandes administrateur",
+    "Broadcast de messages",
+    "Statistiques détaillées",
+    "Interface Facebook Messenger",
+    "Personnalité amicale et bienveillante"
+  ],
+  "environment_variables": {
+    "required": [
+      "PAGE_ACCESS_TOKEN",
+      "MISTRAL_API_KEY",
+      "DRIVE_CLIENT_EMAIL",
+      "DRIVE_PRIVATE_KEY",
+      "DRIVE_FOLDER_ID"
+    ],
+    "optional": [
+      "VERIFY_TOKEN",
+      "ADMIN_IDS",
+      "DRIVE_CLIENT_ID",
+      "DRIVE_PRIVATE_KEY_ID", 
+      "DRIVE_PROJECT_ID",
+      "PORT"
+    ]
+  },
+  "storage": {
+    "type": "Google Drive",
+    "files": [
+      "user_memory.json",
+      "user_list.json", 
+      "user_last_images.json"
+    ],
+    "backup_frequency": "5 minutes",
+    "emergency_save": true
+  }
+}
