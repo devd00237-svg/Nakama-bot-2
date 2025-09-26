@@ -177,7 +177,7 @@ async function callGeminiWithRotation(prompt, maxRetries = GEMINI_API_KEYS.lengt
         try {
             const apiKey = getNextGeminiKey();
             const genAI = new GoogleGenerativeAI(apiKey);
-            const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash-lite" });
+            const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
             
             const result = await model.generateContent(prompt);
             const response = result.response.text();
@@ -197,6 +197,11 @@ async function callGeminiWithRotation(prompt, maxRetries = GEMINI_API_KEYS.lengt
             if (error.message.includes('API_KEY') || error.message.includes('quota') || error.message.includes('limit')) {
                 const currentKey = GEMINI_API_KEYS[(currentGeminiKeyIndex - 1 + GEMINI_API_KEYS.length) % GEMINI_API_KEYS.length];
                 markKeyAsFailed(currentKey);
+            }
+            
+            // Ajout d'un délai pour éviter les erreurs 429 (rate limit)
+            if (attempt < maxRetries - 1) {
+                await new Promise(resolve => setTimeout(resolve, 2000)); // Délai de 2 secondes avant la prochaine tentative
             }
             
             // Si c'est la dernière tentative, on lance l'erreur
@@ -271,6 +276,11 @@ async function callGoogleSearchWithRotation(query, log, maxRetries = GOOGLE_SEAR
             if (error.message.includes('API_KEY') || error.message.includes('quota') || error.message.includes('limit') || error.response?.status === 429 || error.response?.status === 403) {
                 const currentKey = GOOGLE_SEARCH_API_KEYS[(currentSearchKeyIndex - 1 + GOOGLE_SEARCH_API_KEYS.length) % GOOGLE_SEARCH_API_KEYS.length];
                 markSearchKeyAsFailed(currentKey);
+            }
+            
+            // Ajout d'un délai pour éviter les erreurs 429 (rate limit)
+            if (attempt < maxRetries - 1) {
+                await new Promise(resolve => setTimeout(resolve, 2000)); // Délai de 2 secondes avant la prochaine tentative
             }
             
             // Si c'est la dernière tentative, on lance l'erreur
