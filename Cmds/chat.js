@@ -18,6 +18,10 @@ const GEMINI_API_KEYS = process.env.GEMINI_API_KEY ? process.env.GEMINI_API_KEY.
 const GOOGLE_SEARCH_API_KEYS = process.env.GOOGLE_SEARCH_API_KEYS ? process.env.GOOGLE_SEARCH_API_KEYS.split(',').map(key => key.trim()) : [];
 const GOOGLE_SEARCH_ENGINE_IDS = process.env.GOOGLE_SEARCH_ENGINE_IDS ? process.env.GOOGLE_SEARCH_ENGINE_IDS.split(',').map(id => id.trim()) : [];
 
+// Configuration des délais pour la rotation et les retries
+const SEARCH_RETRY_DELAY = 3000; // Délai en ms entre tentatives de rotation (ex. : 3 secondes)
+const SEARCH_GLOBAL_COOLDOWN = 5000; // Délai optionnel global entre recherches (ex. : 5 secondes), si besoin
+
 // Fallback: SerpAPI si Google Custom Search n'est pas disponible
 const SERPAPI_KEY = process.env.SERPAPI_KEY;
 
@@ -219,6 +223,8 @@ function getNextSearchPair() {
     
     // Si toutes les clés ont échoué, on reset
     if (failedSearchKeys.size >= GOOGLE_SEARCH_API_KEYS.length) {
+        // AJOUT : Délai avant reset complet pour éviter les boucles rapides
+        new Promise(resolve => setTimeout(resolve, SEARCH_RETRY_DELAY)); // Note : non-await, car sync function
         failedSearchKeys.clear();
         currentSearchKeyIndex = 0;
     }
@@ -252,6 +258,12 @@ async function callGoogleSearchWithRotation(query, log, maxRetries = GOOGLE_SEAR
     let lastError = null;
     
     for (let attempt = 0; attempt < maxRetries; attempt++) {
+        if (attempt > 0) {
+            // AJOUT : Délai entre tentatives pour éviter les limites de taux
+            await new Promise(resolve => setTimeout(resolve, SEARCH_RETRY_DELAY));
+            log.info(`⌛ Délai de ${SEARCH_RETRY_DELAY / 1000} secondes avant retry #${attempt}`);
+        }
+        
         try {
             const { apiKey, engineId } = getNextSearchPair();
             const results = await googleCustomSearch(query, log, apiKey, engineId);
