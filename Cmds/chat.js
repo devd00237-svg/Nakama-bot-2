@@ -14,6 +14,9 @@ const axios = require("axios");
 // Configuration APIs avec rotation des clés Gemini
 const GEMINI_API_KEYS = process.env.GEMINI_API_KEY ? process.env.GEMINI_API_KEY.split(',').map(key => key.trim()) : [];
 
+// Modèles Gemini avec rotation intelligente
+const GEMINI_MODELS = ["gemini-2.5-flash", "gemini-2.5-flash-lite"];
+
 // Configuration APIs avec rotation des clés Google Search (similaire à Gemini)
 const GOOGLE_SEARCH_API_KEYS = process.env.GOOGLE_SEARCH_API_KEYS ? process.env.GOOGLE_SEARCH_API_KEYS.split(',').map(key => key.trim()) : [];
 const GOOGLE_SEARCH_ENGINE_IDS = process.env.GOOGLE_SEARCH_ENGINE_IDS ? process.env.GOOGLE_SEARCH_ENGINE_IDS.split(',').map(id => id.trim()) : [];
@@ -24,6 +27,10 @@ const SERPAPI_KEY = process.env.SERPAPI_KEY;
 // État global pour la rotation des clés Gemini
 let currentGeminiKeyIndex = 0;
 const failedKeys = new Set();
+
+// État global pour la rotation des modèles Gemini
+let currentModelIndex = 0;
+const failedModels = new Set();
 
 // État global pour la rotation des clés Google Search
 let currentSearchKeyIndex = 0;
@@ -169,22 +176,61 @@ function markKeyAsFailed(apiKey) {
     failedKeys.add(apiKey);
 }
 
-// Fonction pour appeler Gemini avec rotation automatique des clés
-async function callGeminiWithRotation(prompt, maxRetries = GEMINI_API_KEYS.length) {
+// Fonction pour obtenir le prochain modèle Gemini disponible (rotation intelligente)
+function getNextModel() {
+    if (GEMINI_MODELS.length === 0) {
+        throw new Error('Aucun modèle Gemini configuré');
+    }
+    
+    // Si tous les modèles ont échoué, on reset
+    if (failedModels.size >= GEMINI_MODELS.length) {
+        failedModels.clear();
+        currentModelIndex = 0;
+    }
+    
+    // Trouver le prochain modèle non défaillant
+    let attempts = 0;
+    while (attempts < GEMINI_MODELS.length) {
+        const model = GEMINI_MODELS[currentModelIndex];
+        currentModelIndex = (currentModelIndex + 1) % GEMINI_MODELS.length;
+        
+        if (!failedModels.has(model)) {
+            return model;
+        }
+        attempts++;
+    }
+    
+    // Si tous les modèles sont marqués comme défaillants, prendre le premier quand même
+    failedModels.clear();
+    currentModelIndex = 0;
+    return GEMINI_MODELS[0];
+}
+
+// Fonction pour marquer un modèle comme défaillant
+function markModelAsFailed(model) {
+    failedModels.add(model);
+}
+
+// Fonction pour appeler Gemini avec rotation automatique des clés et des modèles
+async function callGeminiWithRotation(prompt, maxRetries = GEMINI_API_KEYS.length * GEMINI_MODELS.length) {
     let lastError = null;
     
     for (let attempt = 0; attempt < maxRetries; attempt++) {
+        let apiKey;
+        let modelName;
         try {
-            const apiKey = getNextGeminiKey();
+            apiKey = getNextGeminiKey();
+            modelName = getNextModel();
             const genAI = new GoogleGenerativeAI(apiKey);
-            const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
+            const model = genAI.getGenerativeModel({ model: modelName });
             
             const result = await model.generateContent(prompt);
             const response = result.response.text();
             
             if (response && response.trim()) {
-                // Succès - retirer la clé des clés défaillantes si elle y était
+                // Succès - retirer la clé et le modèle des défaillants si ils y étaient
                 failedKeys.delete(apiKey);
+                failedModels.delete(modelName);
                 return response;
             }
             
@@ -193,10 +239,11 @@ async function callGeminiWithRotation(prompt, maxRetries = GEMINI_API_KEYS.lengt
         } catch (error) {
             lastError = error;
             
-            // Marquer la clé actuelle comme défaillante si c'est une erreur d'API
+            // Marquer la clé et le modèle actuels comme défaillants si c'est une erreur d'API
             if (error.message.includes('API_KEY') || error.message.includes('quota') || error.message.includes('limit')) {
                 const currentKey = GEMINI_API_KEYS[(currentGeminiKeyIndex - 1 + GEMINI_API_KEYS.length) % GEMINI_API_KEYS.length];
                 markKeyAsFailed(currentKey);
+                markModelAsFailed(modelName);
             }
             
             // Ajout d'un délai pour éviter les erreurs 429 (rate limit)
@@ -211,7 +258,7 @@ async function callGeminiWithRotation(prompt, maxRetries = GEMINI_API_KEYS.lengt
         }
     }
     
-    throw lastError || new Error('Toutes les clés Gemini ont échoué');
+    throw lastError || new Error('Toutes les clés et modèles Gemini ont échoué');
 }
 
 // 🆕 FONCTIONS POUR ROTATION GOOGLE SEARCH (similaire à Gemini)
@@ -922,7 +969,7 @@ Utilisateur: ${args}`;
     const senderIdStr = String(senderId);
 
     try {
-        // ✅ PRIORITÉ: Essayer d'abord avec Gemini (avec rotation des clés)
+        // ✅ PRIORITÉ: Essayer d'abord avec Gemini (avec rotation des clés et modèles)
         const geminiResponse = await callGeminiWithRotation(systemPrompt);
         
         if (geminiResponse && geminiResponse.trim()) {
