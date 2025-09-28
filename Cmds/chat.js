@@ -19,8 +19,8 @@ const GOOGLE_SEARCH_API_KEYS = process.env.GOOGLE_SEARCH_API_KEYS ? process.env.
 const GOOGLE_SEARCH_ENGINE_IDS = process.env.GOOGLE_SEARCH_ENGINE_IDS ? process.env.GOOGLE_SEARCH_ENGINE_IDS.split(',').map(id => id.trim()) : [];
 
 // Configuration des délais pour la rotation et les retries
-const SEARCH_RETRY_DELAY = 3000; // Délai en ms entre tentatives de rotation (ex. : 3 secondes)
-const SEARCH_GLOBAL_COOLDOWN = 5000; // Délai optionnel global entre recherches (ex. : 5 secondes), si besoin
+const SEARCH_RETRY_DELAY = 9000; // Délai en ms entre tentatives de rotation (ex. : 3 secondes)
+const SEARCH_GLOBAL_COOLDOWN = 9000; // Délai optionnel global entre recherches (ex. : 5 secondes), si besoin
 
 // Fallback: SerpAPI si Google Custom Search n'est pas disponible
 const SERPAPI_KEY = process.env.SERPAPI_KEY;
