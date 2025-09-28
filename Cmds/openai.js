@@ -1,23 +1,22 @@
-// Cmds/openai.js - Commande OpenAI pour NakamaBot
+// Cmds/chatanywhere.js - Commande ChatAnywhere pour NakamaBot
 // Créée par Durand - Compatible avec NakamaBot v4.0
 
 const axios = require('axios');
 
 // Configuration
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
-const maxTokens = 500;
-const numberGenerateImage = 4;
-const maxStorageMessage = 4;
+const CHATANYWHERE_API_KEY ="sk-inwU3k9uYuOsxdjrz6QDFSJZ8H9wykCZUuRqWOUOiDXYUMlA";
+const maxTokens = 1000;
+const maxStorageMessage = 6;
+const defaultModel = "gpt-4o-ca"; // Modèle par défaut depuis la liste fournie
 
 // Stockage temporaire des utilisations (sera persisté via le système GitHub du bot)
-let openAIUsing = new Map();
-let openAIHistory = new Map();
+let chatAnywhereUsing = new Map();
+let chatAnywhereHistory = new Map();
 
 module.exports = async function(senderId, args, context) {
     const {
         log,
         sendMessage,
-        sendImageMessage,
         addToMemory,
         saveDataImmediate,
         commandData
@@ -26,23 +25,23 @@ module.exports = async function(senderId, args, context) {
     const senderIdStr = String(senderId);
 
     // Vérifier la clé API
-    if (!OPENAI_API_KEY) {
-        log.error("❌ OPENAI_API_KEY manquante pour la commande openai");
-        return "🔑 Oups ! La clé OpenAI n'est pas configurée ! Contacte un admin ! 💕";
+    if (!CHATANYWHERE_API_KEY) {
+        log.error("❌ CHATANYWHERE_API_KEY manquante pour la commande chatanywhere");
+        return "🔑 Oups ! La clé ChatAnywhere n'est pas configurée ! Contacte un admin ! 💕";
     }
 
     // Charger les données depuis le contexte persistant
-    if (commandData.has('openAIUsing')) {
-        openAIUsing = new Map(commandData.get('openAIUsing'));
+    if (commandData.has('chatAnywhereUsing')) {
+        chatAnywhereUsing = new Map(commandData.get('chatAnywhereUsing'));
     }
-    if (commandData.has('openAIHistory')) {
-        openAIHistory = new Map(commandData.get('openAIHistory'));
+    if (commandData.has('chatAnywhereHistory')) {
+        chatAnywhereHistory = new Map(commandData.get('chatAnywhereHistory'));
     }
 
     // Fonction pour sauvegarder les données
-    const saveOpenAIData = () => {
-        commandData.set('openAIUsing', Array.from(openAIUsing.entries()));
-        commandData.set('openAIHistory', Array.from(openAIHistory.entries()));
+    const saveChatAnywhereData = () => {
+        commandData.set('chatAnywhereUsing', Array.from(chatAnywhereUsing.entries()));
+        commandData.set('chatAnywhereHistory', Array.from(chatAnywhereHistory.entries()));
         saveDataImmediate();
     };
 
@@ -53,146 +52,110 @@ module.exports = async function(senderId, args, context) {
 
     try {
         switch (command) {
-            case 'img':
-            case 'image':
-            case 'draw': {
-                if (!content) {
-                    return "🎨 Dis-moi ce que tu veux que je dessine ! Exemple: /openai draw un chat mignon dans l'espace 💕";
+            case 'models':
+            case 'modeles': {
+                if (chatAnywhereUsing.has(senderIdStr)) {
+                    return "⏰ Tu utilises déjà ChatAnywhere ! Attends que ta demande précédente se termine ! 💕";
                 }
 
-                if (openAIUsing.has(senderIdStr)) {
-                    return "⏰ Tu utilises déjà OpenAI ! Attends que ta demande précédente se termine ! 💕";
-                }
-
-                openAIUsing.set(senderIdStr, true);
-                saveOpenAIData();
+                chatAnywhereUsing.set(senderIdStr, true);
+                saveChatAnywhereData();
 
                 try {
-                    log.info(`🎨 Génération d'image OpenAI pour ${senderId}: ${content.substring(0, 50)}...`);
-
-                    // Envoyer un message de traitement
-                    await sendMessage(senderId, "🎨 Je crée ton image avec amour... Ça peut prendre quelques minutes ! ✨💕");
+                    log.info(`📋 Liste des modèles ChatAnywhere pour ${senderId}`);
 
                     const response = await axios({
-                        url: "https://api.openai.com/v1/images/generations",
-                        method: "POST",
+                        url: "https://api.chatanywhere.tech/v1/models",
+                        method: "GET",
                         headers: {
-                            "Authorization": `Bearer ${OPENAI_API_KEY}`,
-                            "Content-Type": "application/json"
+                            "Authorization": `Bearer ${CHATANYWHERE_API_KEY}`
                         },
-                        data: {
-                            prompt: content,
-                            n: numberGenerateImage,
-                            size: '1024x1024',
-                            model: 'dall-e-3'
-                        },
-                        timeout: 60000
+                        timeout: 15000
                     });
 
-                    const imageUrls = response.data.data;
+                    const models = response.data.data;
                     
-                    if (imageUrls && imageUrls.length > 0) {
-                        // Envoyer la première image avec un message
-                        const caption = `🎨 Voilà ton image créée avec amour ! ✨\n\n📝 Prompt: "${content}"\n💖 Créée par OpenAI DALL-E 3 via NakamaBot !`;
+                    if (models && models.length > 0) {
+                        let modelsList = "🤖 **Modèles disponibles sur ChatAnywhere :**\n\n";
                         
-                        const result = await sendImageMessage(senderId, imageUrls[0].url, caption);
+                        models.forEach((model, index) => {
+                            const modelName = model.id;
+                            const owner = model.owned_by;
+                            modelsList += `${index + 1}. **${modelName}** (${owner})\n`;
+                        });
                         
-                        if (result.success) {
-                            addToMemory(senderId, 'user', `[Demande image OpenAI: ${content}]`);
-                            addToMemory(senderId, 'assistant', `[Image générée avec succès: ${content}]`);
-                            log.info(`✅ Image OpenAI envoyée à ${senderId}`);
-                            
-                            // Si plusieurs images, envoyer les autres
-                            if (imageUrls.length > 1) {
-                                for (let i = 1; i < imageUrls.length; i++) {
-                                    await new Promise(resolve => setTimeout(resolve, 1000)); // Délai entre images
-                                    await sendImageMessage(senderId, imageUrls[i].url, `🎨 Image ${i + 1}/${imageUrls.length} ✨`);
-                                }
-                                
-                                return `🎉 ${imageUrls.length} images créées avec succès ! J'espère qu'elles te plaisent ! 💖`;
-                            }
-                            
-                            return "🎉 Image créée avec succès ! J'espère qu'elle te plaît ! 💖";
-                        } else {
-                            throw new Error("Erreur d'envoi de l'image");
-                        }
+                        modelsList += `\n💡 Utilise: \`/chatanywhere model [nom_modele] [message]\` pour chatter avec un modèle spécifique !\n`;
+                        modelsList += `🎯 Modèle par défaut: **${defaultModel}**`;
+                        
+                        log.info(`✅ Liste des modèles ChatAnywhere envoyée à ${senderId}`);
+                        return modelsList;
                     } else {
-                        throw new Error("Aucune image générée");
+                        return "😅 Aucun modèle trouvé ! Contacte un admin ! 💕";
                     }
 
                 } catch (error) {
-                    log.error(`❌ Erreur génération image OpenAI: ${error.message}`);
+                    log.error(`❌ Erreur liste modèles ChatAnywhere: ${error.message}`);
                     
-                    let errorMessage = "💥 Oh non ! Petite erreur lors de la création ! ";
+                    let errorMessage = "💥 Oh non ! Erreur lors de la récupération des modèles ! ";
                     
                     if (error.response?.data?.error?.message) {
-                        const apiError = error.response.data.error.message;
-                        if (apiError.includes("billing")) {
-                            errorMessage += "Problème de facturation OpenAI ! 💳";
-                        } else if (apiError.includes("rate limit")) {
-                            errorMessage += "Trop de demandes ! Réessaie dans quelques minutes ! ⏰";
-                        } else if (apiError.includes("content policy")) {
-                            errorMessage += "Ton prompt ne respecte pas les règles d'OpenAI ! Essaie quelque chose de plus gentil ! 😊";
-                        } else {
-                            errorMessage += `Erreur API: ${apiError}`;
-                        }
+                        errorMessage += `Erreur API: ${error.response.data.error.message}`;
                     } else {
                         errorMessage += "Réessaie dans quelques minutes ! 💕";
                     }
                     
                     return errorMessage;
                 } finally {
-                    openAIUsing.delete(senderIdStr);
-                    saveOpenAIData();
+                    chatAnywhereUsing.delete(senderIdStr);
+                    saveChatAnywhereData();
                 }
             }
 
-            case 'clear': {
-                openAIHistory.delete(senderIdStr);
-                saveOpenAIData();
-                log.info(`🗑️ Historique OpenAI effacé pour ${senderId}`);
-                return "🧹 Ton historique de chat OpenAI a été effacé avec tendresse ! ✨💕";
-            }
+            case 'model':
+            case 'modele': {
+                // Chat avec un modèle spécifique: /chatanywhere model gpt-5-ca Bonjour !
+                const modelArgs = content.split(' ');
+                const selectedModel = modelArgs[0];
+                const message = modelArgs.slice(1).join(' ');
 
-            default: {
-                // Chat avec GPT
-                if (!args.trim()) {
-                    return "💬 Dis-moi quelque chose pour qu'on puisse chatter ! Ou utilise:\n\n🎨 /openai draw [description] - pour créer une image\n🧹 /openai clear - pour effacer l'historique\n💬 /openai [message] - pour chatter ! 💕";
+                if (!selectedModel || !message) {
+                    return "🤖 Spécifie un modèle et ton message ! Exemple: `/chatanywhere model gpt-5-ca Bonjour !` 💕\n\n📋 Tape `/chatanywhere models` pour voir la liste !";
                 }
 
-                if (openAIUsing.has(senderIdStr)) {
-                    return "⏰ Tu utilises déjà OpenAI ! Attends que ta demande précédente se termine ! 💕";
+                if (chatAnywhereUsing.has(senderIdStr)) {
+                    return "⏰ Tu utilises déjà ChatAnywhere ! Attends que ta demande précédente se termine ! 💕";
                 }
 
-                openAIUsing.set(senderIdStr, true);
-                saveOpenAIData();
+                chatAnywhereUsing.set(senderIdStr, true);
+                saveChatAnywhereData();
 
                 try {
-                    // Récupérer l'historique
-                    let history = openAIHistory.get(senderIdStr) || [];
+                    log.info(`💬 Chat ChatAnywhere avec ${selectedModel} pour ${senderId}: ${message.substring(0, 50)}...`);
+
+                    // Récupérer l'historique spécifique au modèle
+                    const historyKey = `${senderIdStr}_${selectedModel}`;
+                    let history = chatAnywhereHistory.get(historyKey) || [];
                     
                     // Limiter l'historique
-                    if (history.length >= maxStorageMessage * 2) { // *2 car user + assistant
+                    if (history.length >= maxStorageMessage * 2) {
                         history = history.slice(-maxStorageMessage * 2);
                     }
 
                     // Ajouter le message utilisateur
                     history.push({
                         role: 'user',
-                        content: args.trim()
+                        content: message
                     });
 
-                    log.info(`💬 Chat OpenAI pour ${senderId}: ${args.substring(0, 50)}...`);
-
                     const response = await axios({
-                        url: "https://api.openai.com/v1/chat/completions",
+                        url: "https://api.chatanywhere.tech/v1/chat/completions",
                         method: "POST",
                         headers: {
-                            "Authorization": `Bearer ${OPENAI_API_KEY}`,
+                            "Authorization": `Bearer ${CHATANYWHERE_API_KEY}`,
                             "Content-Type": "application/json"
                         },
                         data: {
-                            model: "gpt-4o-mini", // Modèle plus récent et économique
+                            model: selectedModel,
                             messages: [
                                 {
                                     role: "system",
@@ -203,7 +166,124 @@ module.exports = async function(senderId, args, context) {
                             max_tokens: maxTokens,
                             temperature: 0.7
                         },
-                        timeout: 30000
+                        timeout: 45000
+                    });
+
+                    const aiResponse = response.data.choices[0].message.content;
+
+                    // Sauvegarder la réponse dans l'historique du modèle
+                    history.push({
+                        role: 'assistant',
+                        content: aiResponse
+                    });
+
+                    chatAnywhereHistory.set(historyKey, history);
+                    saveChatAnywhereData();
+
+                    // Ajouter à la mémoire du bot
+                    addToMemory(senderId, 'user', `[${selectedModel}] ${message}`);
+                    addToMemory(senderId, 'assistant', `[${selectedModel}] ${aiResponse}`);
+
+                    log.info(`✅ Réponse ChatAnywhere (${selectedModel}) envoyée à ${senderId}`);
+                    
+                    return `🤖 **${selectedModel}** répond :\n\n${aiResponse}`;
+
+                } catch (error) {
+                    log.error(`❌ Erreur chat ChatAnywhere avec ${selectedModel}: ${error.message}`);
+                    
+                    let errorMessage = `💥 Oh non ! Erreur avec le modèle **${selectedModel}** ! `;
+                    
+                    if (error.response?.data?.error?.message) {
+                        const apiError = error.response.data.error.message;
+                        if (apiError.includes("model")) {
+                            errorMessage += "Modèle non trouvé ! Vérifie le nom ! 🔍";
+                        } else if (apiError.includes("billing")) {
+                            errorMessage += "Problème de facturation ! 💳";
+                        } else if (apiError.includes("rate limit")) {
+                            errorMessage += "Trop de demandes ! Réessaie dans quelques minutes ! ⏰";
+                        } else {
+                            errorMessage += `Erreur API: ${apiError}`;
+                        }
+                    } else {
+                        errorMessage += "Réessaie avec un autre modèle ! 💕";
+                    }
+                    
+                    return errorMessage;
+                } finally {
+                    chatAnywhereUsing.delete(senderIdStr);
+                    saveChatAnywhereData();
+                }
+            }
+
+            case 'clear': {
+                // Effacer l'historique de tous les modèles pour cet utilisateur
+                const keysToDelete = [];
+                for (let key of chatAnywhereHistory.keys()) {
+                    if (key.startsWith(senderIdStr + '_')) {
+                        keysToDelete.push(key);
+                    }
+                }
+                
+                keysToDelete.forEach(key => {
+                    chatAnywhereHistory.delete(key);
+                });
+                
+                saveChatAnywhereData();
+                log.info(`🗑️ Historique ChatAnywhere effacé pour ${senderId}`);
+                return "🧹 Ton historique de chat ChatAnywhere a été effacé pour tous les modèles avec tendresse ! ✨💕";
+            }
+
+            default: {
+                // Chat avec le modèle par défaut
+                if (!args.trim()) {
+                    return `💬 Dis-moi quelque chose pour qu'on puisse chatter ! Ou utilise:\n\n🤖 \`/chatanywhere model [nom] [message]\` - pour chatter avec un modèle spécifique\n📋 \`/chatanywhere models\` - pour voir tous les modèles\n🧹 \`/chatanywhere clear\` - pour effacer l'historique\n💬 \`/chatanywhere [message]\` - pour chatter avec **${defaultModel}** ! 💕`;
+                }
+
+                if (chatAnywhereUsing.has(senderIdStr)) {
+                    return "⏰ Tu utilises déjà ChatAnywhere ! Attends que ta demande précédente se termine ! 💕";
+                }
+
+                chatAnywhereUsing.set(senderIdStr, true);
+                saveChatAnywhereData();
+
+                try {
+                    // Récupérer l'historique du modèle par défaut
+                    const historyKey = `${senderIdStr}_${defaultModel}`;
+                    let history = chatAnywhereHistory.get(historyKey) || [];
+                    
+                    // Limiter l'historique
+                    if (history.length >= maxStorageMessage * 2) {
+                        history = history.slice(-maxStorageMessage * 2);
+                    }
+
+                    // Ajouter le message utilisateur
+                    history.push({
+                        role: 'user',
+                        content: args.trim()
+                    });
+
+                    log.info(`💬 Chat ChatAnywhere (défaut: ${defaultModel}) pour ${senderId}: ${args.substring(0, 50)}...`);
+
+                    const response = await axios({
+                        url: "https://api.chatanywhere.tech/v1/chat/completions",
+                        method: "POST",
+                        headers: {
+                            "Authorization": `Bearer ${CHATANYWHERE_API_KEY}`,
+                            "Content-Type": "application/json"
+                        },
+                        data: {
+                            model: defaultModel,
+                            messages: [
+                                {
+                                    role: "system",
+                                    content: "Tu es un assistant IA très gentil et amical, comme une bonne amie. Tu réponds en français avec beaucoup de bienveillance et d'emojis mignons. Tu es intégrée dans NakamaBot créée par Durand. Reste toujours positive et aidante ! 💕"
+                                },
+                                ...history
+                            ],
+                            max_tokens: maxTokens,
+                            temperature: 0.7
+                        },
+                        timeout: 45000
                     });
 
                     const aiResponse = response.data.choices[0].message.content;
@@ -214,26 +294,26 @@ module.exports = async function(senderId, args, context) {
                         content: aiResponse
                     });
 
-                    openAIHistory.set(senderIdStr, history);
-                    saveOpenAIData();
+                    chatAnywhereHistory.set(historyKey, history);
+                    saveChatAnywhereData();
 
                     // Ajouter à la mémoire du bot
                     addToMemory(senderId, 'user', args.trim());
                     addToMemory(senderId, 'assistant', aiResponse);
 
-                    log.info(`✅ Réponse OpenAI envoyée à ${senderId}`);
+                    log.info(`✅ Réponse ChatAnywhere (défaut) envoyée à ${senderId}`);
                     
                     return aiResponse;
 
                 } catch (error) {
-                    log.error(`❌ Erreur chat OpenAI: ${error.message}`);
+                    log.error(`❌ Erreur chat ChatAnywhere: ${error.message}`);
                     
                     let errorMessage = "💥 Oh non ! Petite erreur de chat ! ";
                     
                     if (error.response?.data?.error?.message) {
                         const apiError = error.response.data.error.message;
                         if (apiError.includes("billing")) {
-                            errorMessage += "Problème de facturation OpenAI ! 💳";
+                            errorMessage += "Problème de facturation ! 💳";
                         } else if (apiError.includes("rate limit")) {
                             errorMessage += "Trop de demandes ! Réessaie dans quelques minutes ! ⏰";
                         } else {
@@ -245,16 +325,16 @@ module.exports = async function(senderId, args, context) {
                     
                     return errorMessage;
                 } finally {
-                    openAIUsing.delete(senderIdStr);
-                    saveOpenAIData();
+                    chatAnywhereUsing.delete(senderIdStr);
+                    saveChatAnywhereData();
                 }
             }
         }
 
     } catch (error) {
-        log.error(`❌ Erreur générale commande openai: ${error.message}`);
-        openAIUsing.delete(senderIdStr);
-        saveOpenAIData();
+        log.error(`❌ Erreur générale commande chatanywhere: ${error.message}`);
+        chatAnywhereUsing.delete(senderIdStr);
+        saveChatAnywhereData();
         return "💥 Oh là là ! Une petite erreur s'est glissée ! Réessaie ou tape /help ! 💕";
     }
 };
