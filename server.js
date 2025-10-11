@@ -438,484 +438,1206 @@ const getGitHubApiUrl = (filename) => {
     return `https://api.github.com/repos/${GITHUB_USERNAME}/${GITHUB_REPO}/contents/${filename}`;
 };
 
-// Headers pour GitHub API
-const getGitHubHeaders = () => ({
-    'Authorization': `token ${GITHUB_TOKEN}`,
-    'Accept': 'application/vnd.github.v3+json',
-    'User-Agent': 'NakamaBot-App'
-});
-
-// Fonction pour charger les données depuis GitHub
-async function loadDataFromGitHub() {
+// Créer le repository GitHub si nécessaire
+async function createGitHubRepo() {
     if (!GITHUB_TOKEN || !GITHUB_USERNAME) {
-        log.warning("⚠️ Configuration GitHub incomplète - Utilisation mémoire locale uniquement");
+        log.error("❌ GITHUB_TOKEN ou GITHUB_USERNAME manquant pour créer le repo");
+        return false;
+    }
+
+    try {
+        const checkResponse = await axios.get(
+            `https://api.github.com/repos/${GITHUB_USERNAME}/${GITHUB_REPO}`,
+            {
+                headers: {
+                    'Authorization': `token ${GITHUB_TOKEN}`,
+                    'Accept': 'application/vnd.github.v3+json'
+                },
+                timeout: 10000
+            }
+        );
+        
+        if (checkResponse.status === 200) {
+            log.info(`✅ Repository ${GITHUB_REPO} existe déjà`);
+            return true;
+        }
+    } catch (error) {
+        if (error.response?.status === 404) {
+            try {
+                const createResponse = await axios.post(
+                    'https://api.github.com/user/repos',
+                    {
+                        name: GITHUB_REPO,
+                        description: 'Sauvegarde des données NakamaBot - Créé automatiquement',
+                        private: true,
+                        auto_init: true
+                    },
+                    {
+                        headers: {
+                            'Authorization': `token ${GITHUB_TOKEN}`,
+                            'Accept': 'application/vnd.github.v3+json'
+                        },
+                        timeout: 15000
+                    }
+                );
+
+                if (createResponse.status === 201) {
+                    log.info(`🎉 Repository ${GITHUB_REPO} créé avec succès !`);
+                    log.info(`📝 URL: https://github.com/${GITHUB_USERNAME}/${GITHUB_REPO}`);
+                    return true;
+                }
+            } catch (createError) {
+                log.error(`❌ Erreur création repository: ${createError.message}`);
+                return false;
+            }
+        } else {
+            log.error(`❌ Erreur vérification repository: ${error.message}`);
+            return false;
+        }
+    }
+
+    return false;
+}
+
+// Variable pour éviter les sauvegardes simultanées
+let isSaving = false;
+let saveQueue = [];
+
+// === SAUVEGARDE GITHUB AVEC SUPPORT CLANS ET EXPÉRIENCE ===
+async function saveDataToGitHub() {
+    if (!GITHUB_TOKEN || !GITHUB_USERNAME) {
+        log.debug("🔄 Pas de sauvegarde GitHub (config manquante)");
         return;
     }
-    
+
+    if (isSaving) {
+        log.debug("⏳ Sauvegarde déjà en cours, ajout à la queue");
+        return new Promise((resolve) => {
+            saveQueue.push(resolve);
+        });
+    }
+
+    isSaving = true;
+
     try {
-        // Charger userList
-        const userListResponse = await axios.get(getGitHubApiUrl('userList.json'), {
-            headers: getGitHubHeaders(),
-            timeout: 10000
-        });
-        const userListData = decodeBase64(userListResponse.data.content);
-        userList = new Set(userListData);
+        log.debug(`💾 Tentative de sauvegarde sur GitHub: ${GITHUB_USERNAME}/${GITHUB_REPO}`);
         
-        // Charger userMemory
-        const userMemoryResponse = await axios.get(getGitHubApiUrl('userMemory.json'), {
-            headers: getGitHubHeaders(),
-            timeout: 10000
-        });
-        const userMemoryData = decodeBase64(userMemoryResponse.data.content);
-        userMemory = new Map(Object.entries(userMemoryData));
+        const filename = 'nakamabot-data.json';
+        const url = getGitHubApiUrl(filename);
         
-        // Charger userLastImage
-        const userLastImageResponse = await axios.get(getGitHubApiUrl('userLastImage.json'), {
-            headers: getGitHubHeaders(),
-            timeout: 10000
-        });
-        const userLastImageData = decodeBase64(userLastImageResponse.data.content);
-        userLastImage = new Map(Object.entries(userLastImageData));
-        
-        // Charger clanData
-        const clanDataResponse = await axios.get(getGitHubApiUrl('clanData.json'), {
-            headers: getGitHubHeaders(),
-            timeout: 10000
-        });
-        const clanDataData = decodeBase64(clanDataResponse.data.content);
-        clanData = new Map(Object.entries(clanDataData));
-        
-        // Charger truncatedMessages
-        const truncatedResponse = await axios.get(getGitHubApiUrl('truncatedMessages.json'), {
-            headers: getGitHubHeaders(),
-            timeout: 10000
-        });
-        const truncatedData = decodeBase64(truncatedResponse.data.content);
-        truncatedMessages = new Map(Object.entries(truncatedData));
-        
-        // Charger googleKeyUsage
-        const googleUsageResponse = await axios.get(getGitHubApiUrl('googleKeyUsage.json'), {
-            headers: getGitHubHeaders(),
-            timeout: 10000
-        });
-        const googleUsageData = decodeBase64(googleUsageResponse.data.content);
-        googleKeyUsage = new Map(Object.entries(googleUsageData));
-        
-        // Charger données d'expérience si rankCommand existe
-        if (rankCommand) {
-            const expResponse = await axios.get(getGitHubApiUrl('userExp.json'), {
-                headers: getGitHubHeaders(),
-                timeout: 10000
-            });
-            const expData = decodeBase64(expResponse.data.content);
-            rankCommand.loadExpData(expData);
+        const dataToSave = {
+            userList: Array.from(userList),
+            userMemory: Object.fromEntries(userMemory),
+            userLastImage: Object.fromEntries(userLastImage),
+            
+            // ✅ NOUVEAU: Sauvegarder les données d'expérience
+            userExp: rankCommand ? rankCommand.getExpData() : {},
+            
+            // 🆕 NOUVEAU: Sauvegarder les messages tronqués
+            truncatedMessages: Object.fromEntries(truncatedMessages),
+            
+            // ✅ NOUVEAU: Sauvegarder l'usage des clés Google
+            googleKeyUsage: Object.fromEntries(googleKeyUsage),
+            currentGoogleKeyIndex,
+            currentSearchEngineIndex,
+            
+            // Données des clans et autres commandes
+            clanData: commandContext.clanData || null,
+            commandData: Object.fromEntries(clanData),
+            
+            lastUpdate: new Date().toISOString(),
+            version: "4.0 Amicale + Vision + GitHub + Clans + Rank + Truncation + Google Search",
+            totalUsers: userList.size,
+            totalConversations: userMemory.size,
+            totalImages: userLastImage.size,
+            totalTruncated: truncatedMessages.size,
+            totalClans: commandContext.clanData ? Object.keys(commandContext.clanData.clans || {}).length : 0,
+            totalUsersWithExp: rankCommand ? Object.keys(rankCommand.getExpData()).length : 0,
+            totalGoogleKeys: GOOGLE_API_KEYS.length,
+            totalSearchEngines: GOOGLE_SEARCH_ENGINE_IDS.length,
+            bot: "NakamaBot",
+            creator: "Durand"
+        };
+
+        const commitData = {
+            message: `🤖 Sauvegarde automatique NakamaBot - ${new Date().toISOString()}`,
+            content: encodeBase64(dataToSave)
+        };
+
+        let maxRetries = 3;
+        let success = false;
+
+        for (let attempt = 1; attempt <= maxRetries && !success; attempt++) {
+            try {
+                const existingResponse = await axios.get(url, {
+                    headers: {
+                        'Authorization': `token ${GITHUB_TOKEN}`,
+                        'Accept': 'application/vnd.github.v3+json'
+                    },
+                    timeout: 10000
+                });
+
+                if (existingResponse.data?.sha) {
+                    commitData.sha = existingResponse.data.sha;
+                }
+
+                const response = await axios.put(url, commitData, {
+                    headers: {
+                        'Authorization': `token ${GITHUB_TOKEN}`,
+                        'Accept': 'application/vnd.github.v3+json'
+                    },
+                    timeout: 15000
+                });
+
+                if (response.status === 200 || response.status === 201) {
+                    const clanCount = commandContext.clanData ? Object.keys(commandContext.clanData.clans || {}).length : 0;
+                    const expDataCount = rankCommand ? Object.keys(rankCommand.getExpData()).length : 0;
+                    log.info(`💾 Données sauvegardées sur GitHub (${userList.size} users, ${userMemory.size} convs, ${userLastImage.size} imgs, ${clanCount} clans, ${expDataCount} exp, ${truncatedMessages.size} trunc, ${GOOGLE_API_KEYS.length} Google keys)`);
+                    success = true;
+                } else {
+                    log.error(`❌ Erreur sauvegarde GitHub: ${response.status}`);
+                }
+
+            } catch (retryError) {
+                if (retryError.response?.status === 409 && attempt < maxRetries) {
+                    log.warning(`⚠️ Conflit SHA détecté (409), tentative ${attempt}/${maxRetries}, retry dans 1s...`);
+                    await sleep(1000);
+                    continue;
+                } else if (retryError.response?.status === 404 && attempt === 1) {
+                    log.debug("📝 Premier fichier, pas de SHA nécessaire");
+                    delete commitData.sha;
+                    continue;
+                } else {
+                    throw retryError;
+                }
+            }
         }
-        
-        log.info("✅ Données chargées depuis GitHub avec succès !");
+
+        if (!success) {
+            log.error("❌ Échec de sauvegarde après plusieurs tentatives");
+        }
+
     } catch (error) {
-        if (error.response && error.response.status === 404) {
-            log.warning("⚠️ Fichiers GitHub non trouvés - Initialisation nouvelle base de données");
+        if (error.response?.status === 404) {
+            log.error("❌ Repository GitHub introuvable pour la sauvegarde (404)");
+            log.error(`🔍 Repository utilisé: ${GITHUB_USERNAME}/${GITHUB_REPO}`);
+        } else if (error.response?.status === 401) {
+            log.error("❌ Token GitHub invalide pour la sauvegarde (401)");
+        } else if (error.response?.status === 403) {
+            log.error("❌ Accès refusé GitHub pour la sauvegarde (403)");
+        } else if (error.response?.status === 409) {
+            log.warning("⚠️ Conflit SHA persistant - sauvegarde ignorée pour éviter les blocages");
+        } else {
+            log.error(`❌ Erreur sauvegarde GitHub: ${error.message}`);
+        }
+    } finally {
+        isSaving = false;
+        
+        const queueCallbacks = [...saveQueue];
+        saveQueue = [];
+        queueCallbacks.forEach(callback => callback());
+    }
+}
+
+// === CHARGEMENT GITHUB AVEC SUPPORT CLANS ET EXPÉRIENCE ===
+async function loadDataFromGitHub() {
+    if (!GITHUB_TOKEN || !GITHUB_USERNAME) {
+        log.warning("⚠️ Configuration GitHub manquante, utilisation du stockage temporaire uniquement");
+        return;
+    }
+
+    try {
+        log.info(`🔍 Tentative de chargement depuis GitHub: ${GITHUB_USERNAME}/${GITHUB_REPO}`);
+        
+        const filename = 'nakamabot-data.json';
+        const url = getGitHubApiUrl(filename);
+        
+        const response = await axios.get(url, {
+            headers: {
+                'Authorization': `token ${GITHUB_TOKEN}`,
+                'Accept': 'application/vnd.github.v3+json'
+            },
+            timeout: 10000
+        });
+
+        if (response.status === 200 && response.data.content) {
+            const data = decodeBase64(response.data.content);
+            
+            // Charger userList
+            if (data.userList && Array.isArray(data.userList)) {
+                data.userList.forEach(userId => userList.add(userId));
+                log.info(`✅ ${data.userList.length} utilisateurs chargés depuis GitHub`);
+            }
+
+            // Charger userMemory
+            if (data.userMemory && typeof data.userMemory === 'object') {
+                Object.entries(data.userMemory).forEach(([userId, memory]) => {
+                    if (Array.isArray(memory)) {
+                        userMemory.set(userId, memory);
+                    }
+                });
+                log.info(`✅ ${Object.keys(data.userMemory).length} conversations chargées depuis GitHub`);
+            }
+
+            // Charger userLastImage
+            if (data.userLastImage && typeof data.userLastImage === 'object') {
+                Object.entries(data.userLastImage).forEach(([userId, imageUrl]) => {
+                    userLastImage.set(userId, imageUrl);
+                });
+                log.info(`✅ ${Object.keys(data.userLastImage).length} images chargées depuis GitHub`);
+            }
+
+            // 🆕 NOUVEAU: Charger les messages tronqués
+            if (data.truncatedMessages && typeof data.truncatedMessages === 'object') {
+                Object.entries(data.truncatedMessages).forEach(([userId, truncData]) => {
+                    if (truncData && typeof truncData === 'object') {
+                        truncatedMessages.set(userId, truncData);
+                    }
+                });
+                log.info(`✅ ${Object.keys(data.truncatedMessages).length} messages tronqués chargés depuis GitHub`);
+            }
+
+            // ✅ NOUVEAU: Charger l'usage des clés Google
+            if (data.googleKeyUsage && typeof data.googleKeyUsage === 'object') {
+                Object.entries(data.googleKeyUsage).forEach(([keyId, usage]) => {
+                    googleKeyUsage.set(keyId, usage);
+                });
+                log.info(`✅ ${Object.keys(data.googleKeyUsage).length} données d'usage Google chargées depuis GitHub`);
+            }
+
+            // Charger les indices des clés Google
+            if (typeof data.currentGoogleKeyIndex === 'number') {
+                currentGoogleKeyIndex = data.currentGoogleKeyIndex;
+            }
+            if (typeof data.currentSearchEngineIndex === 'number') {
+                currentSearchEngineIndex = data.currentSearchEngineIndex;
+            }
+
+            // ✅ NOUVEAU: Charger les données d'expérience
+            if (data.userExp && typeof data.userExp === 'object' && rankCommand) {
+                rankCommand.loadExpData(data.userExp);
+                log.info(`✅ ${Object.keys(data.userExp).length} données d'expérience chargées depuis GitHub`);
+            }
+
+            // Charger les données des clans
+            if (data.clanData && typeof data.clanData === 'object') {
+                commandContext.clanData = data.clanData;
+                const clanCount = Object.keys(data.clanData.clans || {}).length;
+                log.info(`✅ ${clanCount} clans chargés depuis GitHub`);
+            }
+
+            // Charger autres données de commandes
+            if (data.commandData && typeof data.commandData === 'object') {
+                Object.entries(data.commandData).forEach(([key, value]) => {
+                    clanData.set(key, value);
+                });
+                log.info(`✅ ${Object.keys(data.commandData).length} données de commandes chargées depuis GitHub`);
+            }
+
+            log.info("🎉 Données chargées avec succès depuis GitHub !");
+        }
+    } catch (error) {
+        if (error.response?.status === 404) {
+            log.warning("📁 Aucune sauvegarde trouvée sur GitHub - Première utilisation");
+            log.info("🔧 Création du fichier de sauvegarde initial...");
+            
+            const repoCreated = await createGitHubRepo();
+            if (repoCreated) {
+                await saveDataToGitHub();
+            }
+        } else if (error.response?.status === 401) {
+            log.error("❌ Token GitHub invalide (401) - Vérifiez votre GITHUB_TOKEN");
+        } else if (error.response?.status === 403) {
+            log.error("❌ Accès refusé GitHub (403) - Vérifiez les permissions de votre token");
         } else {
             log.error(`❌ Erreur chargement GitHub: ${error.message}`);
-        }
-    }
-}
-
-// Fonction pour sauvegarder les données sur GitHub
-async function saveDataToGitHub() {
-    if (!GITHUB_TOKEN || !GITHUB_USERNAME) return;
-    
-    try {
-        // Sauvegarder userList
-        const userListContent = encodeBase64(Array.from(userList));
-        const userListSha = await getFileSha('userList.json');
-        await axios.put(getGitHubApiUrl('userList.json'), {
-            message: 'Update userList',
-            content: userListContent,
-            sha: userListSha
-        }, {
-            headers: getGitHubHeaders()
-        });
-        
-        // Sauvegarder userMemory
-        const userMemoryContent = encodeBase64(Object.fromEntries(userMemory));
-        const userMemorySha = await getFileSha('userMemory.json');
-        await axios.put(getGitHubApiUrl('userMemory.json'), {
-            message: 'Update userMemory',
-            content: userMemoryContent,
-            sha: userMemorySha
-        }, {
-            headers: getGitHubHeaders()
-        });
-        
-        // Sauvegarder userLastImage
-        const userLastImageContent = encodeBase64(Object.fromEntries(userLastImage));
-        const userLastImageSha = await getFileSha('userLastImage.json');
-        await axios.put(getGitHubApiUrl('userLastImage.json'), {
-            message: 'Update userLastImage',
-            content: userLastImageContent,
-            sha: userLastImageSha
-        }, {
-            headers: getGitHubHeaders()
-        });
-        
-        // Sauvegarder clanData
-        const clanDataContent = encodeBase64(Object.fromEntries(clanData));
-        const clanDataSha = await getFileSha('clanData.json');
-        await axios.put(getGitHubApiUrl('clanData.json'), {
-            message: 'Update clanData',
-            content: clanDataContent,
-            sha: clanDataSha
-        }, {
-            headers: getGitHubHeaders()
-        });
-        
-        // Sauvegarder truncatedMessages
-        const truncatedContent = encodeBase64(Object.fromEntries(truncatedMessages));
-        const truncatedSha = await getFileSha('truncatedMessages.json');
-        await axios.put(getGitHubApiUrl('truncatedMessages.json'), {
-            message: 'Update truncatedMessages',
-            content: truncatedContent,
-            sha: truncatedSha
-        }, {
-            headers: getGitHubHeaders()
-        });
-        
-        // Sauvegarder googleKeyUsage
-        const googleUsageContent = encodeBase64(Object.fromEntries(googleKeyUsage));
-        const googleUsageSha = await getFileSha('googleKeyUsage.json');
-        await axios.put(getGitHubApiUrl('googleKeyUsage.json'), {
-            message: 'Update googleKeyUsage',
-            content: googleUsageContent,
-            sha: googleUsageSha
-        }, {
-            headers: getGitHubHeaders()
-        });
-        
-        // Sauvegarder données d'expérience si rankCommand existe
-        if (rankCommand) {
-            const expContent = encodeBase64(rankCommand.getExpData());
-            const expSha = await getFileSha('userExp.json');
-            await axios.put(getGitHubApiUrl('userExp.json'), {
-                message: 'Update userExp',
-                content: expContent,
-                sha: expSha
-            }, {
-                headers: getGitHubHeaders()
-            });
-        }
-        
-        log.info("💾 Données sauvegardées sur GitHub !");
-    } catch (error) {
-        log.error(`❌ Erreur sauvegarde GitHub: ${error.message}`);
-    }
-}
-
-// Fonction pour obtenir le SHA d'un fichier GitHub (pour update)
-async function getFileSha(filename) {
-    try {
-        const response = await axios.get(getGitHubApiUrl(filename), {
-            headers: getGitHubHeaders(),
-            timeout: 5000
-        });
-        return response.data.sha;
-    } catch (error) {
-        if (error.response && error.response.status === 404) {
-            // Si fichier non trouvé, créer nouveau
-            await axios.put(getGitHubApiUrl(filename), {
-                message: `Create ${filename}`,
-                content: encodeBase64({}) // Fichier vide initial
-            }, {
-                headers: getGitHubHeaders()
-            });
-            log.info(`📄 Fichier ${filename} créé sur GitHub`);
-            return await getFileSha(filename);
-        }
-        throw error;
-    }
-}
-
-// Sauvegarde immédiate
-function saveDataImmediate() {
-    saveDataToGitHub();
-}
-
-// Auto-save toutes les 5 minutes
-let saveInterval;
-function startAutoSave() {
-    saveInterval = setInterval(saveDataToGitHub, 5 * 60 * 1000);
-}
-
-// === CHARGEMENT DES COMMANDES ===
-const COMMANDS = new Map();
-const commandContext = {
-    log,
-    sendMessage,
-    clanData,
-    addExp, // Fonction pour ajouter de l'exp (définit plus bas)
-    getExpData: () => rankCommand ? rankCommand.getExpData() : {}
-};
-
-async function loadCommands() {
-    const commandsDir = path.join(__dirname, 'commands');
-    const files = fs.readdirSync(commandsDir);
-    
-    for (const file of files) {
-        if (file.endsWith('.js')) {
-            const commandName = file.slice(0, -3);
-            const commandPath = path.join(commandsDir, file);
-            delete require.cache[require.resolve(commandPath)]; // Pour hot reload
-            const commandModule = require(commandPath);
-            
-            if (typeof commandModule === 'function') {
-                COMMANDS.set(commandName, commandModule);
-                log.info(`🎯 Commande /${commandName} chargée !`);
-                
-                if (commandName === 'rank') {
-                    rankCommand = commandModule;
-                    log.info("⭐ Système d'expérience activé !");
-                }
+            if (error.response) {
+                log.error(`📊 Status: ${error.response.status}, Data: ${JSON.stringify(error.response.data)}`);
             }
         }
     }
 }
 
-// === FONCTION D'EXPÉRIENCE BASIQUE (SI RANK NON CHARGÉ) ===
-function addExp(senderId, amount) {
-    if (rankCommand) {
-        rankCommand.addExp(senderId, amount, commandContext);
+// Sauvegarder automatiquement toutes les 5 minutes
+let saveInterval;
+function startAutoSave() {
+    if (saveInterval) {
+        clearInterval(saveInterval);
     }
+    
+    saveInterval = setInterval(async () => {
+        await saveDataToGitHub();
+    }, 5 * 60 * 1000); // 5 minutes
+    
+    log.info("🔄 Sauvegarde automatique GitHub activée (toutes les 5 minutes)");
 }
 
-// === FONCTION SLEEP ===
+// Sauvegarder lors de changements importants (non-bloquant)
+async function saveDataImmediate() {
+    saveDataToGitHub().catch(err => 
+        log.debug(`🔄 Sauvegarde en arrière-plan: ${err.message}`)
+    );
+}
+
+// === UTILITAIRES ===
+
 function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-// === ENVOI MESSAGE FACEBOOK ===
-async function sendMessage(senderId, text) {
-    try {
-        const response = await axios.post(`https://graph.facebook.com/v2.6/me/messages`, {
-            recipient: { id: senderId },
-            message: { text },
-            messaging_type: 'RESPONSE'
-        }, {
-            params: { access_token: PAGE_ACCESS_TOKEN },
-            timeout: 10000
-        });
-        
-        return { success: true, messageId: response.data.message_id };
-    } catch (error) {
-        log.error(`❌ Erreur envoi message: ${error.message}`);
-        return { success: false };
-    }
+function getRandomInt(min, max) {
+    return Math.floor(Math.random() * (max - min + 1)) + min;
 }
 
-// === GESTION MÉMOIRE ===
-function addToMemory(senderId, role, content) {
-    if (!userMemory.has(senderId)) {
-        userMemory.set(senderId, []);
+// Appel API Mistral avec retry
+async function callMistralAPI(messages, maxTokens = 200, temperature = 0.7) {
+    if (!MISTRAL_API_KEY) {
+        return null;
     }
-    userMemory.get(senderId).push({ role, content });
     
-    // Limiter à 20 messages par utilisateur
-    if (userMemory.get(senderId).length > 20) {
-        userMemory.get(senderId).shift();
+    const headers = {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${MISTRAL_API_KEY}`
+    };
+    
+    const data = {
+        model: "mistral-small-latest",
+        messages: messages,
+        max_tokens: maxTokens,
+        temperature: temperature
+    };
+    
+    for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+            const response = await axios.post(
+                "https://api.mistral.ai/v1/chat/completions",
+                data,
+                { headers, timeout: 30000 }
+            );
+            
+            if (response.status === 200) {
+                return response.data.choices[0].message.content;
+            } else if (response.status === 401) {
+                log.error("❌ Clé API Mistral invalide");
+                return null;
+            } else {
+                if (attempt === 0) {
+                    await sleep(2000);
+                    continue;
+                }
+                return null;
+            }
+        } catch (error) {
+            if (attempt === 0) {
+                await sleep(2000);
+                continue;
+            }
+            log.error(`❌ Erreur Mistral: ${error.message}`);
+            return null;
+        }
     }
+    
+    return null;
 }
 
-function getMemoryContext(senderId) {
-    return userMemory.get(senderId) || [];
-}
-
-// === APPEL API MISTRAL ===
-async function callMistralAPI(messages, maxTokens = 2000, temperature = 0.7) {
-    if (!MISTRAL_API_KEY) return null;
+// Analyser une image avec l'API Vision de Mistral
+async function analyzeImageWithVision(imageUrl) {
+    if (!MISTRAL_API_KEY) {
+        return null;
+    }
     
     try {
-        const response = await axios.post('https://api.mistral.ai/v1/chat/completions', {
-            model: 'mistral-large-latest',
-            messages,
-            max_tokens: maxTokens,
-            temperature
-        }, {
-            headers: {
-                'Authorization': `Bearer ${MISTRAL_API_KEY}`,
-                'Content-Type': 'application/json'
-            },
-            timeout: 30000
-        });
+        const headers = {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${MISTRAL_API_KEY}`
+        };
         
-        return response.data.choices[0].message.content.trim();
+        const messages = [{
+            role: "user",
+            content: [
+                {
+                    type: "text",
+                    text: "Décris en détail ce que tu vois dans cette image en français. Sois précise et descriptive, comme si tu expliquais à un(e) ami(e). Maximum 300 mots avec des emojis mignons. 💕"
+                },
+                {
+                    type: "image_url",
+                    image_url: {
+                        url: imageUrl
+                    }
+                }
+            ]
+        }];
+        
+        const data = {
+            model: "pixtral-12b-2409",
+            messages: messages,
+            max_tokens: 400,
+            temperature: 0.3
+        };
+        
+        const response = await axios.post(
+            "https://api.mistral.ai/v1/chat/completions",
+            data,
+            { headers, timeout: 30000 }
+        );
+        
+        if (response.status === 200) {
+            return response.data.choices[0].message.content;
+        } else {
+            log.error(`❌ Erreur Vision API: ${response.status}`);
+            return null;
+        }
     } catch (error) {
-        log.error(`❌ Erreur Mistral: ${error.message}`);
+        log.error(`❌ Erreur analyse image: ${error.message}`);
         return null;
     }
 }
 
-// === WEBHOOK VERIFICATION ===
-app.get('/webhook', (req, res) => {
-    if (req.query['hub.mode'] === 'subscribe' && req.query['hub.verify_token'] === VERIFY_TOKEN) {
-        log.info("✅ Webhook vérifié !");
-        res.status(200).send(req.query['hub.challenge']);
-    } else {
-        res.sendStatus(403);
+// ✅ GESTION CORRIGÉE DE LA MÉMOIRE - ÉVITER LES DOUBLONS
+function addToMemory(userId, msgType, content) {
+    if (!userId || !msgType || !content) {
+        log.debug("❌ Paramètres manquants pour addToMemory");
+        return;
     }
-});
-
-// === WEBHOOK PRINCIPAL ===
-app.post('/webhook', (req, res) => {
-    const body = req.body;
     
-    if (body.object === 'page') {
-        body.entry.forEach(entry => {
-            const webhookEvent = entry.messaging[0];
-            const senderId = webhookEvent.sender.id;
-            
-            userList.add(senderId);
-            
-            if (webhookEvent.message) {
-                handleMessage(senderId, webhookEvent.message);
-            }
-        });
-        res.status(200).send('EVENT_RECEIVED');
-    } else {
-        res.sendStatus(404);
+    if (content.length > 1500) {
+        content = content.substring(0, 1400) + "...[tronqué]";
     }
-});
-
-// === GESTION DES MESSAGES ===
-async function handleMessage(senderId, message) {
-    try {
-        if (message.attachments) {
-            const attachment = message.attachments[0];
-            
-            if (attachment.type === 'image') {
-                const imageUrl = attachment.payload.url;
-                userLastImage.set(senderId, imageUrl);
-                
-                // Modification: Répondre uniquement avec ✅
-                await sendMessage(senderId, "✅");
+    
+    if (!userMemory.has(userId)) {
+        userMemory.set(userId, []);
+    }
+    
+    const memory = userMemory.get(userId);
+    
+    // ✅ NOUVELLE LOGIQUE: Vérifier les doublons
+    if (memory.length > 0) {
+        const lastMessage = memory[memory.length - 1];
+        
+        if (lastMessage.type === msgType && lastMessage.content === content) {
+            log.debug(`🔄 Doublon évité pour ${userId}: ${msgType.substring(0, 50)}...`);
+            return;
+        }
+        
+        if (msgType === 'assistant' && lastMessage.type === 'assistant') {
+            const similarity = calculateSimilarity(lastMessage.content, content);
+            if (similarity > 0.8) {
+                log.debug(`🔄 Doublon assistant évité (similarité: ${Math.round(similarity * 100)}%)`);
                 return;
             }
-            
-            // Autres types d'attachments si nécessaire
-            await sendMessage(senderId, "Désolée, je ne gère que les images pour le moment ! 💕");
-            return;
         }
+    }
+    
+    memory.push({
+        type: msgType,
+        content: content,
+        timestamp: new Date().toISOString()
+    });
+    
+    if (memory.length > 8) {
+        memory.shift();
+    }
+    
+    log.debug(`💭 Ajouté en mémoire [${userId}]: ${msgType} (${content.length} chars)`);
+    
+    saveDataImmediate().catch(err => 
+        log.debug(`🔄 Erreur sauvegarde mémoire: ${err.message}`)
+    );
+}
+
+// ✅ FONCTION UTILITAIRE: Calculer la similarité entre deux textes
+function calculateSimilarity(text1, text2) {
+    if (!text1 || !text2) return 0;
+    
+    const normalize = (text) => text.toLowerCase().replace(/[^\w\s]/g, '').trim();
+    const norm1 = normalize(text1);
+    const norm2 = normalize(text2);
+    
+    if (norm1 === norm2) return 1;
+    
+    const words1 = new Set(norm1.split(/\s+/));
+    const words2 = new Set(norm2.split(/\s+/));
+    
+    const intersection = new Set([...words1].filter(x => words2.has(x)));
+    const union = new Set([...words1, ...words2]);
+    
+    return intersection.size / union.size;
+}
+
+function getMemoryContext(userId) {
+    const context = [];
+    const memory = userMemory.get(userId) || [];
+    
+    for (const msg of memory) {
+        const role = msg.type === 'user' ? 'user' : 'assistant';
+        context.push({ role, content: msg.content });
+    }
+    
+    return context;
+}
+
+function isAdmin(userId) {
+    return ADMIN_IDS.has(String(userId));
+}
+
+// === FONCTIONS D'ENVOI AVEC GESTION DE TRONCATURE ===
+
+async function sendMessage(recipientId, text) {
+    if (!PAGE_ACCESS_TOKEN) {
+        log.error("❌ PAGE_ACCESS_TOKEN manquant");
+        return { success: false, error: "No token" };
+    }
+    
+    if (!text || typeof text !== 'string') {
+        log.warning("⚠️ Message vide");
+        return { success: false, error: "Empty message" };
+    }
+    
+    // 🆕 GESTION INTELLIGENTE DES MESSAGES LONGS
+    if (text.length > 2000) {
+        log.info(`📏 Message long détecté (${text.length} chars) pour ${recipientId} - Division en chunks`);
         
-        let text = message.text || '';
+        const chunks = splitMessageIntoChunks(text, 2000);
         
-        if (!text.trim()) return;
-        
-        // Gestion continuation
-        if (isContinuationRequest(text)) {
-            const truncatedData = truncatedMessages.get(senderId);
-            if (truncatedData) {
-                const { fullMessage, lastSentPart } = truncatedData;
-                const lastSentIndex = fullMessage.indexOf(lastSentPart) + lastSentPart.length;
-                const remainingMessage = fullMessage.substring(lastSentIndex);
-                
-                if (remainingMessage.trim()) {
-                    const chunks = splitMessageIntoChunks(remainingMessage);
-                    const nextChunk = chunks[0];
-                    
-                    if (chunks.length > 1) {
-                        truncatedMessages.set(senderId, {
-                            fullMessage,
-                            lastSentPart: lastSentPart + nextChunk,
-                            timestamp: new Date().toISOString()
-                        });
-                        await sendMessage(senderId, nextChunk + "\n\n📝 Tape \"continue\" pour la suite...");
-                    } else {
-                        truncatedMessages.delete(senderId);
-                        await sendMessage(senderId, nextChunk);
-                    }
-                } else {
-                    truncatedMessages.delete(senderId);
-                    await sendMessage(senderId, "✅ C'est tout ! 💫");
-                }
-            } else {
-                await sendMessage(senderId, "🤔 Pas de message à continuer ! 💕");
-            }
-            return;
+        if (chunks.length > 1) {
+            // Envoyer le premier chunk avec indicateur de continuation
+            const firstChunk = chunks[0] + "\n\n📝 *Tape \"continue\" pour la suite...*";
+            
+            // Sauvegarder l'état de troncature
+            truncatedMessages.set(String(recipientId), {
+                fullMessage: text,
+                lastSentPart: chunks[0]
+            });
+            
+            // Sauvegarder immédiatement
+            saveDataImmediate();
+            
+            return await sendSingleMessage(recipientId, firstChunk);
         }
-        
-        // Détection commande
-        if (text.startsWith('/')) {
-            const [commandName, ...argsArr] = text.slice(1).split(' ');
-            const args = argsArr.join(' ');
-            
-            const command = COMMANDS.get(commandName.toLowerCase());
-            if (command) {
-                const result = await command(senderId, args, commandContext);
-                if (result) {
-                    if (typeof result === 'object' && result.type === 'image') {
-                        await sendMessage(senderId, result.message);
-                    } else {
-                        const chunks = splitMessageIntoChunks(result);
-                        
-                        if (chunks.length > 1) {
-                            truncatedMessages.set(senderId, {
-                                fullMessage: result,
-                                lastSentPart: chunks[0],
-                                timestamp: new Date().toISOString()
-                            });
-                            await sendMessage(senderId, chunks[0] + "\n\n📝 Tape \"continue\" pour la suite...");
-                        } else {
-                            await sendMessage(senderId, result);
-                        }
-                    }
-                }
-                addExp(senderId, 10); // Exp pour commande
-            } else {
-                await sendMessage(senderId, "🤔 Commande inconnue ! Tape /help pour la liste ! 💕");
+    }
+    
+    // Message normal
+    return await sendSingleMessage(recipientId, text);
+}
+
+async function sendSingleMessage(recipientId, text) {
+    let finalText = text;
+    if (finalText.length > 2000 && !finalText.includes("✨ [Message tronqué avec amour]")) {
+        finalText = finalText.substring(0, 1950) + "...\n✨ [Message tronqué avec amour]";
+    }
+    
+    const data = {
+        recipient: { id: String(recipientId) },
+        message: { text: finalText }
+    };
+    
+    try {
+        const response = await axios.post(
+            "https://graph.facebook.com/v18.0/me/messages",
+            data,
+            {
+                params: { access_token: PAGE_ACCESS_TOKEN },
+                timeout: 15000
             }
-            return;
-        }
+        );
         
-        // Conversation normale
-        const context = getMemoryContext(senderId);
-        const messages = [{
-            role: "system",
-            content: "Tu es NakamaBot, une IA super gentille et amicale, comme une très bonne amie. Réponds avec empathie et humour léger. Nous sommes en 2025."
-        }, ...context, { role: "user", content: text }];
-        
-        const response = await callMistralAPI(messages);
-        
-        if (response) {
-            const chunks = splitMessageIntoChunks(response);
-            
-            if (chunks.length > 1) {
-                truncatedMessages.set(senderId, {
-                    fullMessage: response,
-                    lastSentPart: chunks[0],
-                    timestamp: new Date().toISOString()
-                });
-                await sendMessage(senderId, chunks[0] + "\n\n📝 Tape \"continue\" pour la suite...");
-            } else {
-                await sendMessage(senderId, response);
-            }
-            
-            addToMemory(senderId, 'user', text);
-            addToMemory(senderId, 'assistant', response);
-            addExp(senderId, 5); // Exp pour message
+        if (response.status === 200) {
+            return { success: true };
         } else {
-            await sendMessage(senderId, "Désolée, petite erreur ! Réessaie ? 💕");
+            log.error(`❌ Erreur Facebook API: ${response.status}`);
+            return { success: false, error: `API Error ${response.status}` };
         }
     } catch (error) {
-        log.error(`❌ Erreur handleMessage: ${error.message}`);
-        await sendMessage(senderId, "Oups, petite erreur ! Réessaie plus tard ? 💕");
+        log.error(`❌ Erreur envoi: ${error.message}`);
+        return { success: false, error: error.message };
     }
 }
 
-// Route pour tester Google Search API
-app.get('/test-google', async (req, res) => {
-    const testQuery = req.query.q || "test query";
+async function sendImageMessage(recipientId, imageUrl, caption = "") {
+    if (!PAGE_ACCESS_TOKEN) {
+        log.error("❌ PAGE_ACCESS_TOKEN manquant");
+        return { success: false, error: "No token" };
+    }
+    
+    if (!imageUrl) {
+        log.warning("⚠️ URL d'image vide");
+        return { success: false, error: "Empty image URL" };
+    }
+    
+    const data = {
+        recipient: { id: String(recipientId) },
+        message: {
+            attachment: {
+                type: "image",
+                payload: {
+                    url: imageUrl,
+                    is_reusable: true
+                }
+            }
+        }
+    };
     
     try {
-        const results = await googleSearch(testQuery, 3);
+        const response = await axios.post(
+            "https://graph.facebook.com/v18.0/me/messages",
+            data,
+            {
+                params: { access_token: PAGE_ACCESS_TOKEN },
+                timeout: 20000
+            }
+        );
         
+        if (response.status === 200) {
+            if (caption) {
+                await sleep(500);
+                return await sendMessage(recipientId, caption);
+            }
+            return { success: true };
+        } else {
+            log.error(`❌ Erreur envoi image: ${response.status}`);
+            return { success: false, error: `API Error ${response.status}` };
+        }
+    } catch (error) {
+        log.error(`❌ Erreur envoi image: ${error.message}`);
+        return { success: false, error: error.message };
+    }
+}
+
+// === CHARGEMENT DES COMMANDES ===
+
+const COMMANDS = new Map();
+
+// === CONTEXTE DES COMMANDES AVEC SUPPORT CLANS ET EXPÉRIENCE ===
+const commandContext = {
+    // Variables globales
+    VERIFY_TOKEN,
+    PAGE_ACCESS_TOKEN,
+    MISTRAL_API_KEY,
+    GITHUB_TOKEN,
+    GITHUB_USERNAME,
+    GITHUB_REPO,
+    ADMIN_IDS,
+    
+    // ✅ NOUVEAU: Variables Google Search
+    GOOGLE_API_KEYS,
+    GOOGLE_SEARCH_ENGINE_IDS,
+    googleKeyUsage,
+    currentGoogleKeyIndex,
+    currentSearchEngineIndex,
+    
+    userMemory,
+    userList,
+    userLastImage,
+    
+    // ✅ AJOUT: Données persistantes pour les commandes
+    clanData: null, // Sera initialisé par les commandes
+    commandData: clanData, // Map pour autres données de commandes
+    
+    // 🆕 AJOUT: Gestion des messages tronqués
+    truncatedMessages,
+    
+    // Fonctions utilitaires
+    log,
+    sleep,
+    getRandomInt,
+    callMistralAPI,
+    analyzeImageWithVision,
+    webSearch,
+    googleSearch, // ✅ NOUVEAU: Accès direct à Google Search
+    addToMemory,
+    getMemoryContext,
+    isAdmin,
+    sendMessage,
+    sendImageMessage,
+    
+    // 🆕 AJOUT: Fonctions de gestion de troncature
+    splitMessageIntoChunks,
+    isContinuationRequest,
+    
+    // Fonctions de sauvegarde GitHub
+    saveDataToGitHub,
+    saveDataImmediate,
+    loadDataFromGitHub,
+    createGitHubRepo
+};
+
+// ✅ FONCTION loadCommands MODIFIÉE pour capturer la commande rank
+function loadCommands() {
+    const commandsDir = path.join(__dirname, 'Cmds');
+    
+    if (!fs.existsSync(commandsDir)) {
+        log.error("❌ Dossier 'Cmds' introuvable");
+        return;
+    }
+    
+    const commandFiles = fs.readdirSync(commandsDir).filter(file => file.endsWith('.js'));
+    
+    log.info(`🔍 Chargement de ${commandFiles.length} commandes...`);
+    
+    for (const file of commandFiles) {
+        try {
+            const commandPath = path.join(commandsDir, file);
+            const commandName = path.basename(file, '.js');
+            
+            delete require.cache[require.resolve(commandPath)];
+            
+            const commandModule = require(commandPath);
+            
+            if (typeof commandModule !== 'function') {
+                log.error(`❌ ${file} doit exporter une fonction`);
+                continue;
+            }
+            
+            COMMANDS.set(commandName, commandModule);
+            
+            // ✅ NOUVEAU: Capturer la commande rank pour l'expérience
+            if (commandName === 'rank') {
+                rankCommand = commandModule;
+                log.info(`🎯 Système d'expérience activé avec la commande rank`);
+            }
+            
+            log.info(`✅ Commande '${commandName}' chargée`);
+            
+        } catch (error) {
+            log.error(`❌ Erreur chargement ${file}: ${error.message}`);
+        }
+    }
+    
+    log.info(`🎉 ${COMMANDS.size} commandes chargées avec succès !`);
+}
+
+async function processCommand(senderId, messageText) {
+    const senderIdStr = String(senderId);
+    
+    if (!messageText || typeof messageText !== 'string') {
+        return "🤖 Oh là là ! Message vide ! Tape /start ou /help pour commencer notre belle conversation ! 💕";
+    }
+    
+    messageText = messageText.trim();
+    
+    // 🆕 GESTION DES DEMANDES DE CONTINUATION EN PRIORITÉ
+    if (isContinuationRequest(messageText)) {
+        const truncatedData = truncatedMessages.get(senderIdStr);
+        if (truncatedData) {
+            const { fullMessage, lastSentPart } = truncatedData;
+            
+            // Trouver où on s'était arrêté
+            const lastSentIndex = fullMessage.indexOf(lastSentPart) + lastSentPart.length;
+            const remainingMessage = fullMessage.substring(lastSentIndex);
+            
+            if (remainingMessage.trim()) {
+                const chunks = splitMessageIntoChunks(remainingMessage, 2000);
+                const nextChunk = chunks[0];
+                
+                // Mettre à jour le cache avec la nouvelle partie envoyée
+                if (chunks.length > 1) {
+                    truncatedMessages.set(senderIdStr, {
+                        fullMessage: fullMessage,
+                        lastSentPart: lastSentPart + nextChunk
+                    });
+                    
+                    // Ajouter un indicateur de continuation
+                    const continuationMsg = nextChunk + "\n\n📝 *Tape \"continue\" pour la suite...*";
+                    addToMemory(senderIdStr, 'user', messageText);
+                    addToMemory(senderIdStr, 'assistant', continuationMsg);
+                    saveDataImmediate(); // Sauvegarder l'état
+                    return continuationMsg;
+                } else {
+                    // Message terminé
+                    truncatedMessages.delete(senderIdStr);
+                    addToMemory(senderIdStr, 'user', messageText);
+                    addToMemory(senderIdStr, 'assistant', nextChunk);
+                    saveDataImmediate(); // Sauvegarder l'état
+                    return nextChunk;
+                }
+            } else {
+                // Plus rien à envoyer
+                truncatedMessages.delete(senderIdStr);
+                const endMsg = "✅ C'est tout ! Y a-t-il autre chose que je puisse faire pour toi ? 💫";
+                addToMemory(senderIdStr, 'user', messageText);
+                addToMemory(senderIdStr, 'assistant', endMsg);
+                saveDataImmediate(); // Sauvegarder l'état
+                return endMsg;
+            }
+        } else {
+            // Pas de message tronqué en cours
+            const noTruncMsg = "🤔 Il n'y a pas de message en cours à continuer. Pose-moi une nouvelle question ! 💡";
+            addToMemory(senderIdStr, 'user', messageText);
+            addToMemory(senderIdStr, 'assistant', noTruncMsg);
+            return noTruncMsg;
+        }
+    }
+    
+    if (!messageText.startsWith('/')) {
+        if (COMMANDS.has('chat')) {
+            return await COMMANDS.get('chat')(senderId, messageText, commandContext);
+        }
+        return "🤖 Coucou ! Tape /start ou /help pour découvrir ce que je peux faire ! ✨";
+    }
+    
+    const parts = messageText.substring(1).split(' ');
+    const command = parts[0].toLowerCase();
+    const args = parts.slice(1).join(' ');
+    
+    if (COMMANDS.has(command)) {
+        try {
+            return await COMMANDS.get(command)(senderId, args, commandContext);
+        } catch (error) {
+            log.error(`❌ Erreur commande ${command}: ${error.message}`);
+            return `💥 Oh non ! Petite erreur dans /${command} ! Réessaie ou tape /help ! 💕`;
+        }
+    }
+    
+    return `❓ Oh ! La commande /${command} m'est inconnue ! Tape /help pour voir tout ce que je sais faire ! ✨💕`;
+}
+
+// === ROUTES EXPRESS ===
+
+// === ROUTE D'ACCUEIL MISE À JOUR ===
+app.get('/', (req, res) => {
+    const clanCount = commandContext.clanData ? Object.keys(commandContext.clanData.clans || {}).length : 0;
+    const expDataCount = rankCommand ? Object.keys(rankCommand.getExpData()).length : 0;
+    
+    res.json({
+        status: "🤖 NakamaBot v4.0 Amicale + Vision + GitHub + Clans + Rank + Truncation + Google Search Online ! 💖",
+        creator: "Durand",
+        personality: "Super gentille et amicale, comme une très bonne amie",
+        year: "2025",
+        commands: COMMANDS.size,
+        users: userList.size,
+        conversations: userMemory.size,
+        images_stored: userLastImage.size,
+        clans_total: clanCount,
+        users_with_exp: expDataCount,
+        truncated_messages: truncatedMessages.size,
+        google_api_keys: GOOGLE_API_KEYS.length,
+        google_search_engines: GOOGLE_SEARCH_ENGINE_IDS.length,
+        version: "4.0 Amicale + Vision + GitHub + Clans + Rank + Truncation + Google Search",
+        storage: {
+            type: "GitHub API",
+            repository: `${GITHUB_USERNAME}/${GITHUB_REPO}`,
+            persistent: Boolean(GITHUB_TOKEN && GITHUB_USERNAME),
+            auto_save: "Every 5 minutes",
+            includes: ["users", "conversations", "images", "clans", "command_data", "user_exp", "truncated_messages", "google_key_usage"]
+        },
+        features: [
+            "Génération d'images IA",
+            "Transformation anime", 
+            "Analyse d'images IA",
+            "Chat intelligent et doux",
+            "Système de clans persistant",
+            "Système de ranking et expérience",
+            "Cartes de rang personnalisées",
+            "Gestion intelligente des messages longs",
+            "Continuation automatique des réponses",
+            "Recherche Google avec rotation de clés",
+            "Fallback recherche IA",
+            "Broadcast admin",
+            "Stats réservées admin",
+            "Sauvegarde permanente GitHub"
+        ],
+        last_update: new Date().toISOString()
+    });
+});
+
+// Webhook Facebook Messenger
+app.get('/webhook', (req, res) => {
+    const mode = req.query['hub.mode'];
+    const token = req.query['hub.verify_token'];
+    const challenge = req.query['hub.challenge'];
+    
+    if (mode === 'subscribe' && token === VERIFY_TOKEN) {
+        log.info('✅ Webhook vérifié');
+        res.status(200).send(challenge);
+    } else {
+        log.warning('❌ Échec vérification webhook');
+        res.status(403).send('Verification failed');
+    }
+});
+
+// ✅ WEBHOOK PRINCIPAL MODIFIÉ - AJOUT D'EXPÉRIENCE ET NOTIFICATIONS DE NIVEAU
+app.post('/webhook', async (req, res) => {
+    try {
+        const data = req.body;
+        
+        if (!data) {
+            log.warning('⚠️ Aucune donnée reçue');
+            return res.status(400).json({ error: "No data received" });
+        }
+        
+        for (const entry of data.entry || []) {
+            for (const event of entry.messaging || []) {
+                const senderId = event.sender?.id;
+                
+                if (!senderId) {
+                    continue;
+                }
+                
+                const senderIdStr = String(senderId);
+                
+                if (event.message && !event.message.is_echo) {
+                    const wasNewUser = !userList.has(senderIdStr);
+                    userList.add(senderIdStr);
+                    
+                    if (wasNewUser) {
+                        log.info(`👋 Nouvel utilisateur: ${senderId}`);
+                        saveDataImmediate();
+                    }
+                    
+                    if (event.message.attachments) {
+                        for (const attachment of event.message.attachments) {
+                            if (attachment.type === 'image') {
+                                const imageUrl = attachment.payload?.url;
+                                if (imageUrl) {
+                                    userLastImage.set(senderIdStr, imageUrl);
+                                    log.info(`📸 Image reçue de ${senderId}`);
+                                    
+                                    addToMemory(senderId, 'user', '[Image envoyée]');
+                                    
+                                    // ✅ NOUVEAU: Ajouter de l'expérience pour l'envoi d'image
+                                    if (rankCommand) {
+                                        const expResult = rankCommand.addExp(senderId, 2); // 2 XP pour une image
+                                        
+                                        if (expResult.levelUp) {
+                                            log.info(`🎉 ${senderId} a atteint le niveau ${expResult.newLevel} (image) !`);
+                                        }
+                                    }
+                                    
+                                    saveDataImmediate();
+                                    
+                                    const response = "📸 Super ! J'ai bien reçu ton image ! ✨\n\n🎭 Tape /anime pour la transformer en style anime !\n👁️ Tape /vision pour que je te dise ce que je vois !\n\n💕 Ou continue à me parler normalement !";
+                                    
+                                    const sendResult = await sendMessage(senderId, response);
+                                    if (sendResult.success) {
+                                        addToMemory(senderId, 'assistant', response);
+                                    }
+                                    continue;
+                                }
+                            }
+                        }
+                    }
+                    
+                    const messageText = event.message.text?.trim();
+                    
+                    if (messageText) {
+                        log.info(`📨 Message de ${senderId}: ${messageText.substring(0, 50)}...`);
+                        
+                        // ✅ NOUVEAU: Ajouter de l'expérience pour chaque message
+                        if (messageText && rankCommand) {
+                            const expResult = rankCommand.addExp(senderId, 1);
+                            
+                            // Notifier si l'utilisateur a monté de niveau
+                            if (expResult.levelUp) {
+                                log.info(`🎉 ${senderId} a atteint le niveau ${expResult.newLevel} !`);
+                            }
+                            
+                            // Sauvegarder les données mises à jour
+                            saveDataImmediate();
+                        }
+                        
+                        const response = await processCommand(senderId, messageText);
+                        
+                        if (response) {
+                            if (typeof response === 'object' && response.type === 'image') {
+                                const sendResult = await sendImageMessage(senderId, response.url, response.caption);
+                                
+                                if (sendResult.success) {
+                                    log.info(`✅ Image envoyée à ${senderId}`);
+                                } else {
+                                    log.warning(`❌ Échec envoi image à ${senderId}`);
+                                    const fallbackMsg = "🎨 Image créée avec amour mais petite erreur d'envoi ! Réessaie ! 💕";
+                                    const fallbackResult = await sendMessage(senderId, fallbackMsg);
+                                    if (fallbackResult.success) {
+                                        addToMemory(senderId, 'assistant', fallbackMsg);
+                                    }
+                                }
+                            } else if (typeof response === 'string') {
+                                const sendResult = await sendMessage(senderId, response);
+                                
+                                if (sendResult.success) {
+                                    log.info(`✅ Réponse envoyée à ${senderId}`);
+                                } else {
+                                    log.warning(`❌ Échec envoi à ${senderId}`);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    } catch (error) {
+        log.error(`❌ Erreur webhook: ${error.message}`);
+        return res.status(500).json({ error: `Webhook error: ${error.message}` });
+    }
+    
+    res.status(200).json({ status: "ok" });
+});
+
+// ✅ NOUVELLE ROUTE: Statistiques Google Search
+app.get('/google-stats', (req, res) => {
+    const today = new Date().toDateString();
+    const keyStats = [];
+    
+    for (let keyIndex = 0; keyIndex < GOOGLE_API_KEYS.length; keyIndex++) {
+        for (let engineIndex = 0; engineIndex < GOOGLE_SEARCH_ENGINE_IDS.length; engineIndex++) {
+            const keyId = `${keyIndex}-${engineIndex}-${today}`;
+            const usage = googleKeyUsage.get(keyId) || 0;
+            const remaining = GOOGLE_DAILY_LIMIT - usage;
+            
+            keyStats.push({
+                keyIndex,
+                engineIndex,
+                searchEngineId: GOOGLE_SEARCH_ENGINE_IDS[engineIndex],
+                usage,
+                remaining,
+                limit: GOOGLE_DAILY_LIMIT,
+                percentage: Math.round((usage / GOOGLE_DAILY_LIMIT) * 100)
+            });
+        }
+    }
+    
+    res.json({
+        success: true,
+        date: today,
+        currentKeyIndex: currentGoogleKeyIndex,
+        currentEngineIndex: currentSearchEngineIndex,
+        totalKeys: GOOGLE_API_KEYS.length,
+        totalEngines: GOOGLE_SEARCH_ENGINE_IDS.length,
+        totalCombinations: GOOGLE_API_KEYS.length * GOOGLE_SEARCH_ENGINE_IDS.length,
+        keyStats: keyStats,
+        summary: {
+            totalUsage: keyStats.reduce((sum, stat) => sum + stat.usage, 0),
+            totalRemaining: keyStats.reduce((sum, stat) => sum + stat.remaining, 0),
+            averageUsage: Math.round(keyStats.reduce((sum, stat) => sum + stat.percentage, 0) / keyStats.length),
+            exhaustedKeys: keyStats.filter(stat => stat.remaining <= 0).length
+        },
+        timestamp: new Date().toISOString()
+    });
+});
+
+// Route pour créer un nouveau repository GitHub
+app.post('/create-repo', async (req, res) => {
+    try {
+        if (!GITHUB_TOKEN || !GITHUB_USERNAME) {
+            return res.status(400).json({
+                success: false,
+                error: "GITHUB_TOKEN ou GITHUB_USERNAME manquant"
+            });
+        }
+
+        const repoCreated = await createGitHubRepo();
+        
+        if (repoCreated) {
+            res.json({
+                success: true,
+                message: "Repository GitHub créé avec succès !",
+                repository: `${GITHUB_USERNAME}/${GITHUB_REPO}`,
+                url: `https://github.com/${GITHUB_USERNAME}/${GITHUB_REPO}`,
+                instructions: [
+                    "Le repository a été créé automatiquement",
+                    "Les données seront sauvegardées automatiquement",
+                    "Vérifiez que le repository est privé pour la sécurité"
+                ],
+                timestamp: new Date().toISOString()
+            });
+        } else {
+            res.status(500).json({
+                success: false,
+                error: "Impossible de créer le repository"
+            });
+        }
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
+// Route pour tester la connexion GitHub
+app.get('/test-github', async (req, res) => {
+    try {
+        if (!GITHUB_TOKEN || !GITHUB_USERNAME) {
+            return res.status(400).json({
+                success: false,
+                error: "Configuration GitHub manquante",
+                missing: {
+                    token: !GITHUB_TOKEN,
+                    username: !GITHUB_USERNAME
+                }
+            });
+        }
+
+        const repoUrl = `https://api.github.com/repos/${GITHUB_USERNAME}/${GITHUB_REPO}`;
+        const response = await axios.get(repoUrl, {
+            headers: {
+                'Authorization': `token ${GITHUB_TOKEN}`,
+                'Accept': 'application/vnd.github.v3+json'
+            },
+            timeout: 10000
+        });
+
+        res.json({
+            success: true,
+            message: "Connexion GitHub OK !",
+            repository: `${GITHUB_USERNAME}/${GITHUB_REPO}`,
+            url: `https://github.com/${GITHUB_USERNAME}/${GITHUB_REPO}`,
+            status: response.status,
+            private: response.data.private,
+            created_at: response.data.created_at,
+            timestamp: new Date().toISOString()
+        });
+
+    } catch (error) {
+        let errorMessage = error.message;
+        let suggestions = [];
+
+        if (error.response?.status === 404) {
+            errorMessage = "Repository introuvable (404)";
+            suggestions = [
+                "Vérifiez que GITHUB_USERNAME et GITHUB_REPO sont corrects",
+                "Utilisez POST /create-repo pour créer automatiquement le repository"
+            ];
+        } else if (error.response?.status === 401) {
+            errorMessage = "Token GitHub invalide (401)";
+            suggestions = ["Vérifiez votre GITHUB_TOKEN"];
+        } else if (error.response?.status === 403) {
+            errorMessage = "Accès refusé (403)";
+            suggestions = ["Vérifiez les permissions de votre token (repo, contents)"];
+        }
+
+        res.status(error.response?.status || 500).json({
+            success: false,
+            error: errorMessage,
+            suggestions: suggestions,
+            repository: `${GITHUB_USERNAME}/${GITHUB_REPO}`,
+            timestamp: new Date().toISOString()
+        });
+    }
+});
+
+// ✅ NOUVELLE ROUTE: Tester les clés Google Search
+app.get('/test-google', async (req, res) => {
+    try {
+        if (GOOGLE_API_KEYS.length === 0 || GOOGLE_SEARCH_ENGINE_IDS.length === 0) {
+            return res.status(400).json({
+                success: false,
+                error: "Configuration Google Search manquante",
+                missing: {
+                    apiKeys: GOOGLE_API_KEYS.length === 0,
+                    searchEngines: GOOGLE_SEARCH_ENGINE_IDS.length === 0
+                },
+                instructions: [
+                    "Ajoutez GOOGLE_API_KEYS (séparées par des virgules)",
+                    "Ajoutez GOOGLE_SEARCH_ENGINE_IDS (séparés par des virgules)",
+                    "Obtenez vos clés sur https://console.developers.google.com"
+                ]
+            });
+        }
+
+        const testQuery = "test search";
+        const results = await googleSearch(testQuery, 3);
+
         if (results && results.length > 0) {
             res.json({
                 success: true,
