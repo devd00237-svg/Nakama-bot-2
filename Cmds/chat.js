@@ -1111,7 +1111,7 @@ module.exports = async function cmdChat(senderId, args, ctx) {
     try {
         // Message de traitement
         if (args.trim() && !isContinuationRequest(args)) {
-            const processingMessage = "🕒 Traitement en cours...";
+            const processingMessage = "🕒...";
             addToMemory(String(senderId), 'assistant', processingMessage);
             await ctx.sendMessage(senderId, processingMessage);
         }
