@@ -717,6 +717,7 @@ INSTRUCTIONS CRITIQUES:
 - Si c'est une question de suivi (ex: "leur rang" après avoir parlé du Cameroun), intègre naturellement le contexte
 - Utilise Markdown simple (**gras**, ### titres, listes)
 - PAS d'italique (*texte*)
+- Ne commence pas ta réponse par 'Salut' ou une salutation similaire sauf si l'utilisateur t'a salué dans son message actuel (ex: mots comme 'salut', 'bonjour', 'hello', 'hi') ou si c'est une continuation où il l'a fait précédemment dans l'historique.
 
 EXEMPLE DE RÉPONSE CONTEXTUELLE:
 Historique: "Le Cameroun est quantième ?" → Bot: "Le Cameroun est 56ème..."
@@ -739,7 +740,7 @@ RÉPONSE NATURELLE EN CONTINUITÉ:`;
         try {
             const messages = [{
                 role: "system",
-                content: `Tu es NakamaBot avec MÉMOIRE COMPLÈTE. Tu connais tout l'historique. Réponds naturellement en tenant compte du contexte. Ne mentionne JAMAIS de recherches. Markdown simple OK.
+                content: `Tu es NakamaBot avec MÉMOIRE COMPLÈTE. Tu connais tout l'historique. Réponds naturellement en tenant compte du contexte. Ne mentionne JAMAIS de recherches. Markdown simple OK. Ne commence pas ta réponse par 'Salut' ou une salutation similaire sauf si l'utilisateur t'a salué dans son message actuel (ex: mots comme 'salut', 'bonjour', 'hello', 'hi') ou si c'est une continuation où il l'a fait précédemment dans l'historique.
 
 Historique complet:
 ${conversationContext ? conversationContext.map(msg => `${msg.role === 'user' ? 'Utilisateur' : 'NakamaBot'}: ${msg.content}`).join('\n') : "Début"}`
@@ -849,6 +850,7 @@ DIRECTIVES:
 - PAS d'italique
 - UTILISE ta MÉMOIRE: si l'utilisateur dit "et lui ?", "combien ?", "leur classement ?", tu sais de qui/quoi il parle grâce à l'historique
 - Si des informations récentes sont disponibles ci-dessous, intègre-les naturellement sans jamais dire "j'ai trouvé" ou "d'après mes recherches"
+- Ne commence pas ta réponse par 'Salut' ou une salutation similaire sauf si l'utilisateur t'a salué dans son message actuel (ex: mots comme 'salut', 'bonjour', 'hello', 'hi') ou si c'est une continuation où il l'a fait précédemment dans l'historique.
 
 HISTORIQUE COMPLET:
 ${conversationHistory ? conversationHistory : 'Début de conversation'}
@@ -1039,7 +1041,7 @@ async function generateContextualResponse(originalMessage, commandResult, comman
         const contextPrompt = `Utilisateur: "${originalMessage}"
 Résultat /${commandName}: "${commandResult}"
 
-Réponds naturellement et amicalement (max 400 chars). Markdown simple OK, pas d'italique.`;
+Réponds naturellement et amicalement (max 400 chars). Markdown simple OK, pas d'italique. Ne commence pas ta réponse par 'Salut' ou une salutation similaire sauf si l'utilisateur t'a salué dans son message actuel (ex: mots comme 'salut', 'bonjour', 'hello', 'hi').`;
 
         const response = await callGeminiWithRotation(contextPrompt);
         return response || commandResult;
@@ -1048,7 +1050,7 @@ Réponds naturellement et amicalement (max 400 chars). Markdown simple OK, pas d
         const { callMistralAPI } = ctx;
         try {
             const response = await callMistralAPI([
-                { role: "system", content: "Réponds naturellement. Markdown simple OK." },
+                { role: "system", content: "Réponds naturellement. Markdown simple OK. Ne commence pas ta réponse par 'Salut' ou une salutation similaire sauf si l'utilisateur t'a salué dans son message actuel (ex: mots comme 'salut', 'bonjour', 'hello', 'hi')." },
                 { role: "user", content: `Utilisateur: "${originalMessage}"\nRésultat: "${commandResult}"\nPrésente naturellement (max 200 chars)` }
             ], 200, 0.7);
             
@@ -1116,7 +1118,7 @@ module.exports = async function cmdChat(senderId, args, ctx) {
         }
         
         if (!args.trim()) {
-            const welcomeMsg = "💬 Salut je suis NakamaBot! Je suis là pour toi ! Dis-moi ce qui t'intéresse et on va avoir une conversation géniale ! ✨";
+            const welcomeMsg = "💬 Je suis NakamaBot! Je suis là pour toi ! Dis-moi ce qui t'intéresse et on va avoir une conversation géniale ! ✨";
             const styledWelcome = parseMarkdown(welcomeMsg);
             addToMemory(String(senderId), 'assistant', styledWelcome);
             return styledWelcome;
