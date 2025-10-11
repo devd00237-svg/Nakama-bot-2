@@ -776,10 +776,10 @@ Réponds naturellement en continuité de la conversation, comme si tu connaissai
 }
 
 // ========================================
-// 💬 CONVERSATION CLASSIQUE AVEC MÉMOIRE
+// 💬 CONVERSATION UNIFIÉE AVEC RECHERCHE INTÉGRÉE
 // ========================================
 
-async function handleConversationWithFallback(senderId, args, ctx) {
+async function handleConversationWithFallback(senderId, args, ctx, searchResults = null) {
     const { addToMemory, getMemoryContext, callMistralAPI, log, 
             splitMessageIntoChunks, truncatedMessages } = ctx;
     
@@ -802,6 +802,17 @@ async function handleConversationWithFallback(senderId, args, ctx) {
         conversationHistory = context.map(msg => 
             `${msg.role === 'user' ? 'Utilisateur' : 'Assistant'}: ${msg.content}`
         ).join('\n') + '\n';
+    }
+    
+    // 🆕 INJECTION DYNAMIQUE DES RÉSULTATS DE RECHERCHE
+    let searchContext = "";
+    if (searchResults && searchResults.length > 0) {
+        searchContext = `\n\n🔍 INFORMATIONS RÉCENTES DISPONIBLES (utilise-les naturellement si pertinent):
+${searchResults.map((result, index) => 
+    `${index + 1}. ${result.title}: ${result.description}`
+).join('\n\n')}
+
+⚠️ IMPORTANT: Ne mentionne JAMAIS que tu as fait une recherche. Intègre ces informations naturellement dans ta réponse comme si tu les connaissais déjà.`;
     }
     
     const systemPrompt = `Tu es NakamaBot, une IA conversationnelle avancée avec MÉMOIRE CONTEXTUELLE créée par Durand et Cécile.
@@ -837,9 +848,11 @@ DIRECTIVES:
 - Markdown simple OK (**gras**, ### titres, listes)
 - PAS d'italique
 - UTILISE ta MÉMOIRE: si l'utilisateur dit "et lui ?", "combien ?", "leur classement ?", tu sais de qui/quoi il parle grâce à l'historique
+- Si des informations récentes sont disponibles ci-dessous, intègre-les naturellement sans jamais dire "j'ai trouvé" ou "d'après mes recherches"
 
 HISTORIQUE COMPLET:
 ${conversationHistory ? conversationHistory : 'Début de conversation'}
+${searchContext}
 
 Utilisateur: ${args}`;
 
@@ -865,14 +878,14 @@ Utilisateur: ${args}`;
                     const truncatedResponse = firstChunk + "\n\n📝 *Tape \"continue\" pour la suite...*";
                     addToMemory(senderIdStr, 'user', args);
                     addToMemory(senderIdStr, 'assistant', truncatedResponse);
-                    log.info(`💎 Gemini avec troncature`);
+                    log.info(`💎 Gemini avec troncature${searchResults ? ' (+ recherche intégrée)' : ''}`);
                     return truncatedResponse;
                 }
             }
             
             addToMemory(senderIdStr, 'user', args);
             addToMemory(senderIdStr, 'assistant', styledResponse);
-            log.info(`💎 Gemini réponse normale`);
+            log.info(`💎 Gemini réponse normale${searchResults ? ' (+ recherche intégrée)' : ''}`);
             return styledResponse;
         }
         
@@ -905,14 +918,14 @@ Utilisateur: ${args}`;
                         const truncatedResponse = firstChunk + "\n\n📝 *Tape \"continue\" pour la suite...*";
                         addToMemory(senderIdStr, 'user', args);
                         addToMemory(senderIdStr, 'assistant', truncatedResponse);
-                        log.info(`🔄 Mistral avec troncature`);
+                        log.info(`🔄 Mistral avec troncature${searchResults ? ' (+ recherche intégrée)' : ''}`);
                         return truncatedResponse;
                     }
                 }
                 
                 addToMemory(senderIdStr, 'user', args);
                 addToMemory(senderIdStr, 'assistant', styledResponse);
-                log.info(`🔄 Mistral fallback`);
+                log.info(`🔄 Mistral fallback${searchResults ? ' (+ recherche intégrée)' : ''}`);
                 return styledResponse;
             }
             
@@ -1195,9 +1208,10 @@ module.exports = async function cmdChat(senderId, args, ctx) {
             }
         }
         
-        // 🆕 DÉCISION RECHERCHE AVEC MÉMOIRE CONTEXTUELLE
+        // 🆕 DÉCISION RECHERCHE AVEC MÉMOIRE CONTEXTUELLE (en arrière-plan)
         const searchDecision = await decideSearchNecessity(args, senderId, conversationHistory, ctx);
         
+        let searchResults = null;
         if (searchDecision.needsExternalSearch) {
             log.info(`🔍 Recherche externe nécessaire: ${searchDecision.reason}`);
             if (searchDecision.usesConversationMemory) {
@@ -1205,45 +1219,24 @@ module.exports = async function cmdChat(senderId, args, ctx) {
             }
             
             try {
-                const searchResults = await performIntelligentSearch(searchDecision.searchQuery, ctx);
+                // Lancer la recherche en parallèle (ne bloque pas la conversation)
+                searchResults = await performIntelligentSearch(searchDecision.searchQuery, ctx);
                 
                 if (searchResults && searchResults.length > 0) {
-                    const naturalResponse = await generateNaturalResponseWithContext(args, searchResults, conversationHistory, ctx);
-                    
-                    if (naturalResponse) {
-                        const styledNatural = parseMarkdown(naturalResponse);
-                        
-                        if (styledNatural.length > 2000) {
-                            const chunks = splitMessageIntoChunks(styledNatural, 2000);
-                            const firstChunk = chunks[0];
-                            
-                            if (chunks.length > 1) {
-                                truncatedMessages.set(senderIdStr, {
-                                    fullMessage: styledNatural,
-                                    lastSentPart: firstChunk,
-                                    timestamp: new Date().toISOString()
-                                });
-                                
-                                const truncatedResponse = firstChunk + "\n\n📝 *Tape \"continue\" pour la suite...*";
-                                addToMemory(String(senderId), 'user', args);
-                                addToMemory(String(senderId), 'assistant', truncatedResponse);
-                                return truncatedResponse;
-                            }
-                        }
-                        
-                        addToMemory(String(senderId), 'user', args);
-                        addToMemory(String(senderId), 'assistant', styledNatural);
-                        log.info(`🔍✅ Recherche contextuelle terminée avec succès`);
-                        return styledNatural;
-                    }
+                    log.info(`🔍✅ ${searchResults.length} résultats trouvés - Intégration dans la conversation`);
+                } else {
+                    log.warning(`⚠️ Aucun résultat trouvé - Conversation normale`);
+                    searchResults = null;
                 }
             } catch (searchError) {
-                log.error(`❌ Erreur recherche: ${searchError.message}`);
+                log.error(`❌ Erreur recherche: ${searchError.message} - Continuation en conversation normale`);
+                searchResults = null;
             }
         }
         
-        // Conversation classique avec mémoire
-        return await handleConversationWithFallback(senderId, args, ctx);
+        // 🆕 CONVERSATION UNIFIÉE: avec ou sans résultats de recherche
+        // La conversation continue naturellement, les résultats sont juste injectés si disponibles
+        return await handleConversationWithFallback(senderId, args, ctx, searchResults);
         
     } finally {
         activeRequests.delete(senderId);
