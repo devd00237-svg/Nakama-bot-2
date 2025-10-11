@@ -1,9 +1,9 @@
 /**
- * NakamaBot - Commande /chat avec recherche GRATUITE et rotation des clés Gemini
+ * NakamaBot - Commande /chat avec MÉMOIRE CONTEXTUELLE et recherche GRATUITE
+ * + Détection commandes 100% IA (pas de mots-clés)
+ * + Recherche contextuelle basée sur l'historique de conversation
  * + Support Markdown vers Unicode stylisé pour Facebook Messenger
- * + Système de troncature synchronisé avec le serveur principal
- * + Délai de 5 secondes entre messages utilisateurs distincts
- * + 🆕 RECHERCHE GRATUITE: DuckDuckGo, Wikipedia, Web Scraping
+ * + Système de troncature synchronisé
  * @param {string} senderId - ID de l'utilisateur
  * @param {string} args - Message de conversation
  * @param {object} ctx - Contexte partagé du bot 
@@ -11,16 +11,15 @@
 
 const { GoogleGenerativeAI } = require("@google/generative-ai");
 const axios = require("axios");
-const cheerio = require("cheerio"); // Pour web scraping
+const cheerio = require("cheerio");
 
 // ========================================
 // 🔑 CONFIGURATION APIs
 // ========================================
 
-// Configuration APIs avec rotation des clés Gemini
 const GEMINI_API_KEYS = process.env.GEMINI_API_KEY ? process.env.GEMINI_API_KEY.split(',').map(key => key.trim()) : [];
 
-// 🆕 RECHERCHE GRATUITE - Pas de clés API nécessaires !
+// 🆕 RECHERCHE GRATUITE
 const SEARCH_CONFIG = {
     duckduckgo: {
         enabled: true,
@@ -41,24 +40,22 @@ const SEARCH_CONFIG = {
     }
 };
 
-// Configuration des délais pour la rotation et les retries
-const SEARCH_RETRY_DELAY = 2000; // Délai entre tentatives (2 secondes)
-const SEARCH_GLOBAL_COOLDOWN = 3000; // Délai global entre recherches
+const SEARCH_RETRY_DELAY = 2000;
+const SEARCH_GLOBAL_COOLDOWN = 3000;
 
-// État global pour la rotation des clés Gemini
+// État global
 let currentGeminiKeyIndex = 0;
 const failedKeys = new Set();
-
-// 🛡️ PROTECTION ANTI-DOUBLONS RENFORCÉE
 const activeRequests = new Map();
 const recentMessages = new Map();
-
-// 🕐 CACHE DE RECHERCHE (évite de refaire les mêmes recherches)
 const searchCache = new Map();
 const CACHE_TTL = 3600000; // 1 heure
 
+// 🆕 CACHE DE CONTEXTE CONVERSATIONNEL (pour analyse contextuelle)
+const conversationContext = new Map(); // senderId -> { lastTopic, entities, intent }
+
 // ========================================
-// 🎨 FONCTIONS DE PARSING MARKDOWN → UNICODE
+// 🎨 FONCTIONS MARKDOWN → UNICODE
 // ========================================
 
 const UNICODE_MAPPINGS = {
@@ -75,10 +72,6 @@ function toBold(str) {
     return str.split('').map(char => UNICODE_MAPPINGS.bold[char] || char).join('');
 }
 
-function toItalic(str) {
-    return str; // Désactivé pour Messenger
-}
-
 function toUnderline(str) {
     return str.split('').map(char => char + '\u0332').join('');
 }
@@ -91,20 +84,10 @@ function parseMarkdown(text) {
     if (!text || typeof text !== 'string') return text;
     
     let parsed = text;
-    
-    // Titres
     parsed = parsed.replace(/^###\s+(.+)$/gm, (match, title) => `🔹 ${toBold(title.trim())}`);
-    
-    // Gras
     parsed = parsed.replace(/\*\*([^*]+)\*\*/g, (match, content) => toBold(content));
-    
-    // Souligné
     parsed = parsed.replace(/__([^_]+)__/g, (match, content) => toUnderline(content));
-    
-    // Barré
     parsed = parsed.replace(/~~([^~]+)~~/g, (match, content) => toStrikethrough(content));
-    
-    // Listes
     parsed = parsed.replace(/^[\s]*[-*]\s+(.+)$/gm, (match, content) => `• ${content.trim()}`);
     
     return parsed;
@@ -180,10 +163,6 @@ async function callGeminiWithRotation(prompt, maxRetries = GEMINI_API_KEYS.lengt
 // 🆕 RECHERCHE GRATUITE - 3 MÉTHODES
 // ========================================
 
-/**
- * 🦆 MÉTHODE 1: DuckDuckGo HTML (Pas de clé API, scraping HTML)
- * Avantages: Gratuit, rapide, respecte la vie privée
- */
 async function searchDuckDuckGo(query, log) {
     const cacheKey = `ddg_${query.toLowerCase()}`;
     const cached = searchCache.get(cacheKey);
@@ -242,10 +221,6 @@ async function searchDuckDuckGo(query, log) {
     }
 }
 
-/**
- * 📚 MÉTHODE 2: Wikipedia API (Gratuit, officiel, fiable)
- * Avantages: API officielle, données structurées, multilingue
- */
 async function searchWikipedia(query, log) {
     const cacheKey = `wiki_${query.toLowerCase()}`;
     const cached = searchCache.get(cacheKey);
@@ -256,7 +231,6 @@ async function searchWikipedia(query, log) {
     }
     
     try {
-        // Recherche de pages
         const searchUrl = `${SEARCH_CONFIG.wikipedia.baseUrl}/page/search/${encodeURIComponent(query)}`;
         const searchResponse = await axios.get(searchUrl, {
             params: { limit: SEARCH_CONFIG.wikipedia.maxResults },
@@ -269,7 +243,6 @@ async function searchWikipedia(query, log) {
         
         const results = [];
         
-        // Récupérer les résumés
         for (const page of searchResponse.data.pages.slice(0, 2)) {
             try {
                 const summaryUrl = `${SEARCH_CONFIG.wikipedia.baseUrl}/page/summary/${encodeURIComponent(page.title)}`;
@@ -303,21 +276,16 @@ async function searchWikipedia(query, log) {
     }
 }
 
-/**
- * 🌐 MÉTHODE 3: Web Scraping Direct (Sites d'actualités français)
- * Avantages: Actualités en temps réel, informations locales
- */
 async function searchWebScraping(query, log) {
     const cacheKey = `scrape_${query.toLowerCase()}`;
     const cached = searchCache.get(cacheKey);
     
-    if (cached && (Date.now() - cached.timestamp < CACHE_TTL / 2)) { // Cache plus court
+    if (cached && (Date.now() - cached.timestamp < CACHE_TTL / 2)) {
         log.info(`💾 Cache Scraping hit pour: ${query}`);
         return cached.results;
     }
     
     try {
-        // Sources françaises fiables
         const sources = [
             `https://news.google.com/search?q=${encodeURIComponent(query)}&hl=fr&gl=FR&ceid=FR:fr`,
             `https://search.yahoo.com/search?p=${encodeURIComponent(query)}&fr=yfp-t`
@@ -334,7 +302,6 @@ async function searchWebScraping(query, log) {
                 
                 const $ = cheerio.load(response.data);
                 
-                // Google News
                 if (url.includes('news.google.com')) {
                     $('article').slice(0, 3).each((i, elem) => {
                         const title = $(elem).find('a').first().text().trim();
@@ -351,7 +318,6 @@ async function searchWebScraping(query, log) {
                     });
                 }
                 
-                // Yahoo Search
                 if (url.includes('yahoo.com')) {
                     $('.dd.algo').slice(0, 2).each((i, elem) => {
                         const title = $(elem).find('h3').text().trim();
@@ -371,7 +337,7 @@ async function searchWebScraping(query, log) {
                 if (results.length >= 3) break;
                 
             } catch (error) {
-                // Continue avec la source suivante
+                // Continue
             }
         }
         
@@ -389,24 +355,17 @@ async function searchWebScraping(query, log) {
     }
 }
 
-/**
- * 🎯 RECHERCHE INTELLIGENTE COMBINÉE (Essaye les 3 méthodes)
- * Cascade: DuckDuckGo → Wikipedia → Web Scraping
- */
 async function performIntelligentSearch(query, ctx) {
     const { log } = ctx;
     
     try {
-        // Méthode 1: DuckDuckGo (Prioritaire)
         if (SEARCH_CONFIG.duckduckgo.enabled) {
             const ddgResults = await searchDuckDuckGo(query, log);
             if (ddgResults.length > 0) return ddgResults;
         }
         
-        // Délai court entre méthodes
         await new Promise(resolve => setTimeout(resolve, 500));
         
-        // Méthode 2: Wikipedia (Pour questions encyclopédiques)
         if (SEARCH_CONFIG.wikipedia.enabled) {
             const wikiResults = await searchWikipedia(query, log);
             if (wikiResults.length > 0) return wikiResults;
@@ -414,7 +373,6 @@ async function performIntelligentSearch(query, ctx) {
         
         await new Promise(resolve => setTimeout(resolve, 500));
         
-        // Méthode 3: Web Scraping (Actualités récentes)
         if (SEARCH_CONFIG.webScraping.enabled) {
             const scrapeResults = await searchWebScraping(query, log);
             if (scrapeResults.length > 0) return scrapeResults;
@@ -430,239 +388,147 @@ async function performIntelligentSearch(query, ctx) {
 }
 
 // ========================================
-// 🛡️ FONCTION PRINCIPALE
+// 🧠 ANALYSE CONTEXTUELLE DE CONVERSATION
 // ========================================
 
-module.exports = async function cmdChat(senderId, args, ctx) {
-    const { addToMemory, getMemoryContext, callMistralAPI, log, 
-            truncatedMessages, splitMessageIntoChunks, isContinuationRequest } = ctx;
-    
-    // Protection anti-doublons
-    const messageSignature = `${senderId}_${args.trim().toLowerCase()}`;
-    const currentTime = Date.now();
-    
-    if (recentMessages.has(messageSignature)) {
-        const lastProcessed = recentMessages.get(messageSignature);
-        if (currentTime - lastProcessed < 30000) {
-            log.warning(`🚫 Message dupliqué ignoré pour ${senderId}`);
-            return;
-        }
-    }
-    
-    if (activeRequests.has(senderId)) {
-        log.warning(`🚫 Demande en cours ignorée pour ${senderId}`);
-        return;
-    }
-    
-    // Délai de 5 secondes entre messages
-    const lastMessageTime = Array.from(recentMessages.entries())
-        .filter(([sig]) => sig.startsWith(`${senderId}_`))
-        .map(([, timestamp]) => timestamp)
-        .sort((a, b) => b - a)[0] || 0;
-        
-    if (lastMessageTime && (currentTime - lastMessageTime < 5000)) {
-        const waitMessage = "🕒 Veuillez patienter 5 secondes avant d'envoyer un nouveau message...";
-        addToMemory(String(senderId), 'assistant', waitMessage);
-        await ctx.sendMessage(senderId, waitMessage);
-        return;
-    }
-    
-    activeRequests.set(senderId, `${senderId}_${currentTime}`);
-    recentMessages.set(messageSignature, currentTime);
-    
-    // Nettoyage cache ancien
-    for (const [signature, timestamp] of recentMessages.entries()) {
-        if (currentTime - timestamp > 120000) {
-            recentMessages.delete(signature);
-        }
-    }
-    
-    try {
-        // Message de traitement
-        if (args.trim() && !isContinuationRequest(args)) {
-            const processingMessage = "🕒 Traitement en cours...";
-            addToMemory(String(senderId), 'assistant', processingMessage);
-            await ctx.sendMessage(senderId, processingMessage);
-        }
-        
-        if (!args.trim()) {
-            const welcomeMsg = "💬 Salut je suis NakamaBot! Je suis là pour toi ! Dis-moi ce qui t'intéresse et on va avoir une conversation géniale ! ✨";
-            const styledWelcome = parseMarkdown(welcomeMsg);
-            addToMemory(String(senderId), 'assistant', styledWelcome);
-            return styledWelcome;
-        }
-        
-        // Gestion continuation
-        const senderIdStr = String(senderId);
-        if (isContinuationRequest(args)) {
-            const truncatedData = truncatedMessages.get(senderIdStr);
-            if (truncatedData) {
-                const { fullMessage, lastSentPart } = truncatedData;
-                const lastSentIndex = fullMessage.indexOf(lastSentPart) + lastSentPart.length;
-                const remainingMessage = fullMessage.substring(lastSentIndex);
-                
-                if (remainingMessage.trim()) {
-                    const chunks = splitMessageIntoChunks(remainingMessage, 2000);
-                    const nextChunk = parseMarkdown(chunks[0]);
-                    
-                    if (chunks.length > 1) {
-                        truncatedMessages.set(senderIdStr, {
-                            fullMessage,
-                            lastSentPart: lastSentPart + chunks[0],
-                            timestamp: new Date().toISOString()
-                        });
-                        
-                        const continuationMsg = nextChunk + "\n\n📝 *Tape \"continue\" pour la suite...*";
-                        addToMemory(senderIdStr, 'user', args);
-                        addToMemory(senderIdStr, 'assistant', continuationMsg);
-                        return continuationMsg;
-                    } else {
-                        truncatedMessages.delete(senderIdStr);
-                        addToMemory(senderIdStr, 'user', args);
-                        addToMemory(senderIdStr, 'assistant', nextChunk);
-                        return nextChunk;
-                    }
-                } else {
-                    truncatedMessages.delete(senderIdStr);
-                    const endMsg = "✅ C'est tout ! Y a-t-il autre chose que je puisse faire pour toi ? 💫";
-                    addToMemory(senderIdStr, 'user', args);
-                    addToMemory(senderIdStr, 'assistant', endMsg);
-                    return endMsg;
-                }
-            } else {
-                const noTruncMsg = "🤔 Il n'y a pas de message en cours à continuer. Pose-moi une nouvelle question ! 💡";
-                addToMemory(senderIdStr, 'user', args);
-                addToMemory(senderIdStr, 'assistant', noTruncMsg);
-                return noTruncMsg;
-            }
-        }
-        
-        // Détection contact admin
-        const contactIntention = detectContactAdminIntention(args);
-        if (contactIntention.shouldContact) {
-            log.info(`📞 Intention contact admin: ${contactIntention.reason}`);
-            const contactSuggestion = generateContactSuggestion(contactIntention.reason, contactIntention.extractedMessage);
-            const styledContact = parseMarkdown(contactSuggestion);
-            
-            addToMemory(String(senderId), 'user', args);
-            addToMemory(String(senderId), 'assistant', styledContact);
-            return styledContact;
-        }
-        
-        // Détection commandes intelligentes
-        const intelligentCommand = await detectIntelligentCommands(args, ctx);
-        if (intelligentCommand.shouldExecute) {
-            log.info(`🧠 Commande détectée: /${intelligentCommand.command}`);
-            
-            try {
-                const commandResult = await executeCommandFromChat(senderId, intelligentCommand.command, intelligentCommand.args, ctx);
-                
-                if (commandResult.success) {
-                    if (typeof commandResult.result === 'object' && commandResult.result.type === 'image') {
-                        addToMemory(String(senderId), 'user', args);
-                        return commandResult.result;
-                    }
-                    
-                    const contextualResponse = await generateContextualResponse(args, commandResult.result, intelligentCommand.command, ctx);
-                    const styledResponse = parseMarkdown(contextualResponse);
-                    
-                    addToMemory(String(senderId), 'user', args);
-                    addToMemory(String(senderId), 'assistant', styledResponse);
-                    return styledResponse;
-                }
-            } catch (error) {
-                log.error(`❌ Erreur commande IA: ${error.message}`);
-            }
-        }
-        
-        // Décision recherche externe
-        const searchDecision = await decideSearchNecessity(args, senderId, ctx);
-        
-        if (searchDecision.needsExternalSearch) {
-            log.info(`🔍 Recherche externe nécessaire: ${searchDecision.reason}`);
-            
-            try {
-                const conversationContext = getMemoryContext(String(senderId)).slice(-8);
-                const searchResults = await performIntelligentSearch(searchDecision.searchQuery, ctx);
-                
-                if (searchResults && searchResults.length > 0) {
-                    const naturalResponse = await generateNaturalResponseWithContext(args, searchResults, conversationContext, ctx);
-                    
-                    if (naturalResponse) {
-                        const styledNatural = parseMarkdown(naturalResponse);
-                        
-                        if (styledNatural.length > 2000) {
-                            const chunks = splitMessageIntoChunks(styledNatural, 2000);
-                            const firstChunk = chunks[0];
-                            
-                            if (chunks.length > 1) {
-                                truncatedMessages.set(senderIdStr, {
-                                    fullMessage: styledNatural,
-                                    lastSentPart: firstChunk,
-                                    timestamp: new Date().toISOString()
-                                });
-                                
-                                const truncatedResponse = firstChunk + "\n\n📝 *Tape \"continue\" pour la suite...*";
-                                addToMemory(String(senderId), 'user', args);
-                                addToMemory(String(senderId), 'assistant', truncatedResponse);
-                                return truncatedResponse;
-                            }
-                        }
-                        
-                        addToMemory(String(senderId), 'user', args);
-                        addToMemory(String(senderId), 'assistant', styledNatural);
-                        log.info(`🔍✅ Recherche terminée avec succès`);
-                        return styledNatural;
-                    }
-                }
-            } catch (searchError) {
-                log.error(`❌ Erreur recherche: ${searchError.message}`);
-            }
-        }
-        
-        // Conversation classique
-        return await handleConversationWithFallback(senderId, args, ctx);
-        
-    } finally {
-        activeRequests.delete(senderId);
-        log.debug(`🔓 Demande libérée pour ${senderId}`);
-    }
-};
-
-// ========================================
-// 🤖 DÉCISION IA POUR RECHERCHE
-// ========================================
-
-async function decideSearchNecessity(userMessage, senderId, ctx) {
+/**
+ * 🆕 EXTRACTION DU CONTEXTE CONVERSATIONNEL
+ * Analyse l'historique pour comprendre le sujet actuel et les entités mentionnées
+ */
+async function analyzeConversationContext(senderId, currentMessage, conversationHistory, ctx) {
     const { log } = ctx;
     
     try {
-        const decisionPrompt = `Tu es un système de décision pour un chatbot.
+        // Construire l'historique des 5 derniers messages
+        const recentHistory = conversationHistory.slice(-5).map(msg => 
+            `${msg.role === 'user' ? 'Utilisateur' : 'Bot'}: ${msg.content}`
+        ).join('\n');
+        
+        const contextPrompt = `Tu es un analyseur de contexte conversationnel ultra-précis.
 
-MESSAGE: "${userMessage}"
+HISTORIQUE RÉCENT:
+${recentHistory}
 
-Détermine si une recherche web est nécessaire.
+MESSAGE ACTUEL: "${currentMessage}"
 
-✅ OUI pour:
-- Infos récentes (actualités 2025-2026)
-- Données factuelles (prix, statistiques, dates)
-- Infos locales/géographiques
+ANALYSE LE CONTEXTE ET EXTRAIS:
+1. **Sujet principal** de la conversation (ex: "Cameroun football", "météo Paris", "histoire France")
+2. **Entités clés** mentionnées (pays, personnes, lieux, événements, équipes sportives)
+3. **Intention** du message actuel (nouvelle_question, continuation, clarification, changement_sujet)
+4. **Référence contextuelle** : le message actuel fait-il référence à quelque chose mentionné avant ? (ex: "leur rang" → référence à une équipe mentionnée)
+
+EXEMPLES:
+- Historique: "Le Cameroun est quantième ?" / Actuel: "je veux leur rang dans leur poule"
+  → Sujet: "Cameroun football classement", Entités: ["Cameroun", "poule"], Intention: "continuation", Référence: "Cameroun (mentionné précédemment)"
+
+- Historique: "Qui est Messi ?" / Actuel: "combien de buts il a marqué ?"
+  → Sujet: "Messi statistiques", Entités: ["Messi", "buts"], Intention: "continuation", Référence: "Messi (mentionné précédemment)"
+
+Réponds UNIQUEMENT avec ce JSON:
+{
+  "mainTopic": "sujet_principal_complet",
+  "entities": ["entité1", "entité2"],
+  "intent": "nouvelle_question|continuation|clarification|changement_sujet",
+  "contextualReference": "description_de_la_référence_ou_null",
+  "enrichedQuery": "requête_de_recherche_enrichie_avec_contexte"
+}`;
+
+        const response = await callGeminiWithRotation(contextPrompt);
+        const jsonMatch = response.match(/\{[\s\S]*\}/);
+        
+        if (jsonMatch) {
+            const context = JSON.parse(jsonMatch[0]);
+            
+            // Sauvegarder le contexte pour cet utilisateur
+            conversationContext.set(senderId, {
+                lastTopic: context.mainTopic,
+                entities: context.entities,
+                intent: context.intent,
+                timestamp: Date.now()
+            });
+            
+            log.info(`🧠 Contexte analysé: ${context.intent} | Sujet: ${context.mainTopic}`);
+            if (context.contextualReference) {
+                log.info(`🔗 Référence contextuelle détectée: ${context.contextualReference}`);
+            }
+            
+            return context;
+        }
+        
+        throw new Error('Format JSON invalide');
+        
+    } catch (error) {
+        log.warning(`⚠️ Erreur analyse contexte: ${error.message}`);
+        
+        // Fallback: retourner le message brut
+        return {
+            mainTopic: currentMessage,
+            entities: [],
+            intent: 'nouvelle_question',
+            contextualReference: null,
+            enrichedQuery: currentMessage
+        };
+    }
+}
+
+// ========================================
+// 🤖 DÉCISION IA POUR RECHERCHE (AVEC CONTEXTE)
+// ========================================
+
+async function decideSearchNecessity(userMessage, senderId, conversationHistory, ctx) {
+    const { log } = ctx;
+    
+    try {
+        // 🆕 D'ABORD: Analyser le contexte conversationnel
+        const contextAnalysis = await analyzeConversationContext(senderId, userMessage, conversationHistory, ctx);
+        
+        // Construire l'historique pour la décision
+        const recentHistory = conversationHistory.slice(-5).map(msg => 
+            `${msg.role === 'user' ? 'Utilisateur' : 'Bot'}: ${msg.content}`
+        ).join('\n');
+        
+        const decisionPrompt = `Tu es un système de décision intelligent pour un chatbot avec MÉMOIRE CONTEXTUELLE.
+
+HISTORIQUE RÉCENT:
+${recentHistory}
+
+MESSAGE ACTUEL: "${userMessage}"
+
+ANALYSE CONTEXTUELLE:
+- Sujet principal: ${contextAnalysis.mainTopic}
+- Entités clés: ${contextAnalysis.entities.join(', ')}
+- Intention: ${contextAnalysis.intent}
+- Référence: ${contextAnalysis.contextualReference || 'aucune'}
+
+RÈGLES DE DÉCISION:
+
+✅ RECHERCHE NÉCESSAIRE si:
+- Informations récentes/actuelles (actualités, événements 2025-2026)
+- Données factuelles spécifiques (classements sportifs, prix, statistiques, dates)
+- Questions de continuation nécessitant des données externes (ex: "leur rang" après avoir parlé d'une équipe)
+- Informations locales/géographiques
 - Questions sur personnes publiques récentes
 - Météo, cours, résultats sportifs
 
-❌ NON pour:
-- Conversations générales
-- Conseils/opinions
-- Questions sur le bot
+❌ PAS DE RECHERCHE si:
+- Conversations générales/philosophiques
+- Conseils/opinions personnelles
+- Questions sur le bot lui-même
 - Créativité (histoires, poèmes)
-- Explications concepts généraux
+- Explications de concepts généraux que l'IA connaît
+- Questions existantes dans la base de connaissances
 
-JSON uniquement:
+🔍 REQUÊTE ENRICHIE:
+Si recherche nécessaire ET que c'est une continuation contextuelle, ENRICHIS la requête avec les entités précédentes.
+Exemple: Message actuel "leur rang dans leur poule" + Contexte "Cameroun football" → Requête: "Cameroun classement poule football 2025"
+
+Réponds UNIQUEMENT avec ce JSON:
 {
   "needsExternalSearch": true/false,
   "confidence": 0.0-1.0,
-  "reason": "explication",
-  "searchQuery": "requête optimisée"
+  "reason": "explication_détaillée",
+  "searchQuery": "requête_optimisée_avec_contexte",
+  "usesConversationMemory": true/false
 }`;
 
         const response = await callGeminiWithRotation(decisionPrompt);
@@ -670,44 +536,131 @@ JSON uniquement:
         
         if (jsonMatch) {
             const decision = JSON.parse(jsonMatch[0]);
-            log.info(`🤖 Décision: ${decision.needsExternalSearch ? 'OUI' : 'NON'} (${decision.confidence})`);
+            
+            log.info(`🤖 Décision recherche: ${decision.needsExternalSearch ? 'OUI' : 'NON'} (${decision.confidence})`);
+            log.info(`📝 Raison: ${decision.reason}`);
+            
+            if (decision.usesConversationMemory) {
+                log.info(`🧠 Utilise la mémoire conversationnelle pour enrichir la recherche`);
+            }
+            
             return decision;
         }
         
         throw new Error('Format invalide');
         
     } catch (error) {
-        log.warning(`⚠️ Erreur décision: ${error.message}`);
-        return detectSearchKeywords(userMessage);
+        log.warning(`⚠️ Erreur décision recherche: ${error.message}`);
+        
+        // Fallback simple
+        return {
+            needsExternalSearch: false,
+            confidence: 0.5,
+            reason: 'fallback',
+            searchQuery: userMessage,
+            usesConversationMemory: false
+        };
     }
 }
 
-function detectSearchKeywords(message) {
-    const lowerMessage = message.toLowerCase();
+// ========================================
+// 🎯 DÉTECTION COMMANDES 100% IA (PAS DE MOTS-CLÉS)
+// ========================================
+
+const VALID_COMMANDS = [
+    'help', 'image', 'vision', 'anime', 'music', 
+    'clan', 'rank', 'contact', 'weather'
+];
+
+async function detectIntelligentCommands(message, conversationHistory, ctx) {
+    const { log } = ctx;
     
-    const indicators = [
-        { patterns: [/\b(202[4-6]|actualité|récent|nouveau|news)\b/], weight: 0.9 },
-        { patterns: [/\b(prix|coût|combien|tarif)\b/], weight: 0.8 },
-        { patterns: [/\b(météo|temps|température)\b/], weight: 0.9 },
-        { patterns: [/\b(où|lieu|localisation)\b/], weight: 0.7 }
-    ];
-    
-    let weight = 0;
-    for (const indicator of indicators) {
-        for (const pattern of indicator.patterns) {
-            if (pattern.test(lowerMessage)) {
-                weight += indicator.weight;
-                break;
+    try {
+        const commandsList = VALID_COMMANDS.map(cmd => `/${cmd}`).join(', ');
+        
+        // Construire l'historique pour contexte
+        const recentHistory = conversationHistory.slice(-3).map(msg => 
+            `${msg.role === 'user' ? 'Utilisateur' : 'Bot'}: ${msg.content}`
+        ).join('\n');
+        
+        const detectionPrompt = `Tu es un système de détection de commandes ULTRA-INTELLIGENT avec MÉMOIRE CONTEXTUELLE.
+
+COMMANDES DISPONIBLES: ${commandsList}
+
+HISTORIQUE RÉCENT:
+${recentHistory}
+
+MESSAGE ACTUEL: "${message}"
+
+ANALYSE INTENTION PROFONDE:
+
+🎯 VRAIS INTENTIONS (confidence 0.85-1.0):
+✅ help: Demande d'aide, guide, liste des fonctionnalités
+✅ image: Demande explicite de création/génération d'image, dessin, illustration
+✅ vision: Demande d'analyse d'une image, description visuelle (suppose qu'une image est envoyée)
+✅ anime: Demande de transformation en style anime/manga d'une image
+✅ music: Demande de recherche de musique sur YouTube, jouer une chanson
+✅ clan: Demande liée aux clans du bot (rejoindre, créer, bataille)
+✅ rank: Demande de statistiques personnelles, niveau, progression dans le bot
+✅ contact: Demande de contacter les administrateurs, signaler un problème
+✅ weather: Demande de météo, prévisions, température
+
+❌ FAUSSES DÉTECTIONS (confidence 0.0-0.4):
+- Questions générales mentionnant un mot-clé: "quel chanteur a chanté cette musique" ≠ /music
+- Conversations normales: "j'aime la musique", "le temps passe", "aide mon ami"
+- Descriptions: "cette image est belle", "il fait chaud", "niveau débutant"
+- Questions informatives: "c'est quoi la météo", "les clans vikings"
+
+RÈGLES STRICTES:
+1. L'utilisateur DOIT vouloir UTILISER une fonctionnalité du bot
+2. Il DOIT y avoir une DEMANDE D'ACTION claire dirigée vers le bot
+3. Tenir compte du CONTEXTE conversationnel (si on vient de parler de football et il dit "leur classement", ce n'est PAS une commande)
+4. Ne détecte une commande QUE si confidence >= 0.85
+
+Réponds UNIQUEMENT avec ce JSON:
+{
+  "isCommand": true/false,
+  "command": "nom_commande_ou_null",
+  "confidence": 0.0-1.0,
+  "extractedArgs": "arguments_extraits_ou_message_complet",
+  "reason": "explication_détaillée",
+  "conversationContext": "analyse_du_contexte"
+}`;
+
+        const response = await callGeminiWithRotation(detectionPrompt);
+        const jsonMatch = response.match(/\{[\s\S]*\}/);
+        
+        if (jsonMatch) {
+            const aiDetection = JSON.parse(jsonMatch[0]);
+            
+            // Validation stricte: seuil élevé de 0.85
+            const isValid = aiDetection.isCommand && 
+                          VALID_COMMANDS.includes(aiDetection.command) && 
+                          aiDetection.confidence >= 0.85;
+            
+            if (isValid) {
+                log.info(`🎯 Commande IA détectée: /${aiDetection.command} (${aiDetection.confidence})`);
+                log.info(`📝 Raison: ${aiDetection.reason}`);
+                log.info(`🧠 Contexte: ${aiDetection.conversationContext}`);
+                
+                return {
+                    shouldExecute: true,
+                    command: aiDetection.command,
+                    args: aiDetection.extractedArgs,
+                    confidence: aiDetection.confidence,
+                    method: 'ai_100percent'
+                };
+            } else if (aiDetection.confidence > 0.4 && aiDetection.confidence < 0.85) {
+                log.info(`🚫 Commande rejetée (confidence ${aiDetection.confidence}): ${aiDetection.reason}`);
             }
         }
+        
+        return { shouldExecute: false };
+        
+    } catch (error) {
+        log.warning(`⚠️ Erreur détection IA commandes: ${error.message}`);
+        return { shouldExecute: false };
     }
-    
-    return {
-        needsExternalSearch: weight > 0.6,
-        searchQuery: message,
-        confidence: Math.min(weight, 1.0),
-        reason: 'fallback_keywords'
-    };
 }
 
 // ========================================
@@ -740,30 +693,36 @@ async function generateNaturalResponseWithContext(originalQuery, searchResults, 
             ).join('\n') + '\n';
         }
         
-        const contextualPrompt = `Tu es NakamaBot, une IA conversationnelle empathique.
+        const contextualPrompt = `Tu es NakamaBot, une IA conversationnelle empathique avec MÉMOIRE CONTEXTUELLE.
 
 CONTEXTE TEMPOREL: ${dateTime}
 
-HISTORIQUE:
+HISTORIQUE COMPLET DE CONVERSATION:
 ${conversationHistory || "Début de conversation"}
 
-QUESTION: "${originalQuery}"
+QUESTION ACTUELLE: "${originalQuery}"
 
-INFORMATIONS TROUVÉES:
+INFORMATIONS TROUVÉES VIA RECHERCHE:
 ${resultsText}
 
-INSTRUCTIONS:
+INSTRUCTIONS CRITIQUES:
+- Tu as une MÉMOIRE COMPLÈTE de toute la conversation ci-dessus
+- Si l'utilisateur fait référence à quelque chose mentionné avant (ex: "leur rang", "combien de buts", "son âge"), tu SAIS de quoi il parle grâce à l'historique
 - Réponds en tenant compte de TOUT le contexte précédent
-- Si référence à conversation antérieure, tu t'en souviens
 - Ton conversationnel et amical avec quelques emojis
 - Maximum 1999 caractères
 - NE MENTIONNE JAMAIS que tu as fait une recherche
-- NE DIS JAMAIS "d'après mes recherches" ou "selon les sources"
-- Réponds naturellement comme dans une conversation continue
+- NE DIS JAMAIS "d'après mes recherches", "selon les sources", "j'ai trouvé"
+- Réponds naturellement comme si tu connaissais déjà ces informations
+- Si c'est une question de suivi (ex: "leur rang" après avoir parlé du Cameroun), intègre naturellement le contexte
 - Utilise Markdown simple (**gras**, ### titres, listes)
 - PAS d'italique (*texte*)
 
-RÉPONSE NATURELLE:`;
+EXEMPLE DE RÉPONSE CONTEXTUELLE:
+Historique: "Le Cameroun est quantième ?" → Bot: "Le Cameroun est 56ème..."
+Actuel: "leur rang dans leur poule" → Bot: "Le Cameroun est 2ème de sa poule avec..."
+
+RÉPONSE NATURELLE EN CONTINUITÉ:`;
 
         const response = await callGeminiWithRotation(contextualPrompt);
         
@@ -780,18 +739,18 @@ RÉPONSE NATURELLE:`;
         try {
             const messages = [{
                 role: "system",
-                content: `Tu es NakamaBot. Tu connais l'historique. Réponds naturellement. Ne mentionne jamais de recherches. Markdown simple OK.
+                content: `Tu es NakamaBot avec MÉMOIRE COMPLÈTE. Tu connais tout l'historique. Réponds naturellement en tenant compte du contexte. Ne mentionne JAMAIS de recherches. Markdown simple OK.
 
-Historique:
+Historique complet:
 ${conversationContext ? conversationContext.map(msg => `${msg.role === 'user' ? 'Utilisateur' : 'NakamaBot'}: ${msg.content}`).join('\n') : "Début"}`
             }, {
                 role: "user", 
-                content: `Question: "${originalQuery}"
+                content: `Question actuelle: "${originalQuery}"
 
-Infos:
+Informations trouvées:
 ${searchResults.map(r => `${r.title}: ${r.description}`).join('\n')}
 
-Réponds naturellement (max 2000 chars):`
+Réponds naturellement en continuité de la conversation, comme si tu connaissais déjà ces infos (max 2000 chars):`
             }];
             
             const mistralResponse = await callMistralAPI(messages, 2000, 0.7);
@@ -817,7 +776,7 @@ Réponds naturellement (max 2000 chars):`
 }
 
 // ========================================
-// 💬 CONVERSATION CLASSIQUE
+// 💬 CONVERSATION CLASSIQUE AVEC MÉMOIRE
 // ========================================
 
 async function handleConversationWithFallback(senderId, args, ctx) {
@@ -845,14 +804,15 @@ async function handleConversationWithFallback(senderId, args, ctx) {
         ).join('\n') + '\n';
     }
     
-    const systemPrompt = `Tu es NakamaBot, une IA conversationnelle avancée créée par Durand et Cécile.
+    const systemPrompt = `Tu es NakamaBot, une IA conversationnelle avancée avec MÉMOIRE CONTEXTUELLE créée par Durand et Cécile.
 
 CONTEXTE TEMPOREL: ${dateTime}
 
 INTELLIGENCE & PERSONNALITÉ:
-- Empathique, créative et intuitive
-- Tu comprends les émotions et intentions
-- Pédagogue naturelle
+- Empathique, créative et intuitive avec MÉMOIRE COMPLÈTE de la conversation
+- Tu te souviens de TOUT ce qui a été dit dans l'historique ci-dessous
+- Si l'utilisateur fait référence à quelque chose mentionné avant, tu SAIS de quoi il parle
+- Pédagogue naturelle qui explique clairement
 - Adaptable selon contexte
 
 CAPACITÉS:
@@ -863,7 +823,7 @@ CAPACITÉS:
 🛡️ Système clans et batailles ("clan")
 📊 Progression et niveau ("mon niveau")
 📞 Contact admin ("contacter admin")
-🔍 Recherche intelligente automatique
+🔍 Recherche intelligente automatique avec mémoire contextuelle
 🆘 Guide complet ("aide")
 
 DIRECTIVES:
@@ -876,8 +836,10 @@ DIRECTIVES:
 - Recommande /contact pour problèmes graves
 - Markdown simple OK (**gras**, ### titres, listes)
 - PAS d'italique
+- UTILISE ta MÉMOIRE: si l'utilisateur dit "et lui ?", "combien ?", "leur classement ?", tu sais de qui/quoi il parle grâce à l'historique
 
-${conversationHistory ? `Historique:\n${conversationHistory}` : ''}
+HISTORIQUE COMPLET:
+${conversationHistory ? conversationHistory : 'Début de conversation'}
 
 Utilisateur: ${args}`;
 
@@ -965,115 +927,6 @@ Utilisateur: ${args}`;
             return styledError;
         }
     }
-}
-
-// ========================================
-// 🧠 DÉTECTION COMMANDES INTELLIGENTES
-// ========================================
-
-const VALID_COMMANDS = [
-    'help', 'image', 'vision', 'anime', 'music', 
-    'clan', 'rank', 'contact', 'weather'
-];
-
-async function detectIntelligentCommands(message, ctx) {
-    const { log } = ctx;
-    
-    try {
-        const commandsList = VALID_COMMANDS.map(cmd => `/${cmd}`).join(', ');
-        
-        const detectionPrompt = `Tu es un système de détection de commandes ultra-précis.
-
-COMMANDES: ${commandsList}
-
-MESSAGE: "${message}"
-
-VRAIS INTENTIONS (confidence 0.8-1.0):
-✅ help: "aide", "help", "que peux-tu faire"
-✅ image: "dessine", "crée une image", "génère"
-✅ vision: "regarde cette image", "analyse"
-✅ anime: "transforme en anime", "style manga"
-✅ music: "joue cette musique", "trouve sur YouTube"
-✅ clan: "rejoindre clan", "bataille"
-✅ rank: "mon niveau", "mes stats"
-✅ contact: "contacter admin", "signaler"
-✅ weather: "météo", "quel temps"
-
-FAUSSES DÉTECTIONS (0.0-0.3):
-❌ Questions générales mentionnant un mot
-❌ Conversations: "j'aime la musique"
-❌ Descriptions: "cette image est belle"
-
-JSON uniquement:
-{
-  "isCommand": true/false,
-  "command": "nom_ou_null",
-  "confidence": 0.0-1.0,
-  "extractedArgs": "arguments",
-  "reason": "explication"
-}`;
-
-        const response = await callGeminiWithRotation(detectionPrompt);
-        const jsonMatch = response.match(/\{[\s\S]*\}/);
-        
-        if (jsonMatch) {
-            const aiDetection = JSON.parse(jsonMatch[0]);
-            
-            const isValid = aiDetection.isCommand && 
-                          VALID_COMMANDS.includes(aiDetection.command) && 
-                          aiDetection.confidence >= 0.8;
-            
-            if (isValid) {
-                log.info(`🎯 Commande: /${aiDetection.command} (${aiDetection.confidence})`);
-                
-                return {
-                    shouldExecute: true,
-                    command: aiDetection.command,
-                    args: aiDetection.extractedArgs,
-                    confidence: aiDetection.confidence,
-                    method: 'ai_contextual'
-                };
-            }
-        }
-        
-        return { shouldExecute: false };
-        
-    } catch (error) {
-        log.warning(`⚠️ Erreur détection: ${error.message}`);
-        return await fallbackStrictKeywordDetection(message, log);
-    }
-}
-
-async function fallbackStrictKeywordDetection(message, log) {
-    const lowerMessage = message.toLowerCase().trim();
-    
-    const strictPatterns = [
-        { command: 'help', patterns: [/^(aide|help|guide)$/] },
-        { command: 'image', patterns: [/^dessine(-moi)?\s+/, /^(crée|génère)\s+(une\s+)?(image|dessin)/] },
-        { command: 'vision', patterns: [/^regarde\s+(cette\s+)?(image|photo)/, /^(analyse|décris)\s+/] },
-        { command: 'music', patterns: [/^(joue|lance|play)\s+/, /^trouve\s+.*musique/] },
-        { command: 'clan', patterns: [/^(rejoindre|créer|mon)\s+clan/] },
-        { command: 'rank', patterns: [/^(mon\s+)?(niveau|rang|stats)/] },
-        { command: 'contact', patterns: [/^contacter\s+admin/] },
-        { command: 'weather', patterns: [/^(météo|quel\s+temps)/] }
-    ];
-    
-    for (const { command, patterns } of strictPatterns) {
-        for (const pattern of patterns) {
-            if (pattern.test(lowerMessage)) {
-                log.info(`🔑 Fallback: /${command}`);
-                return {
-                    shouldExecute: true,
-                    command,
-                    args: message,
-                    confidence: 0.9,
-                    method: 'fallback_strict'
-                };
-            }
-        }
-    }
-    
-    return { shouldExecute: false };
 }
 
 // ========================================
@@ -1194,6 +1047,211 @@ Réponds naturellement et amicalement (max 400 chars). Markdown simple OK, pas d
 }
 
 // ========================================
+// 🛡️ FONCTION PRINCIPALE AVEC MÉMOIRE
+// ========================================
+
+module.exports = async function cmdChat(senderId, args, ctx) {
+    const { addToMemory, getMemoryContext, callMistralAPI, log, 
+            truncatedMessages, splitMessageIntoChunks, isContinuationRequest } = ctx;
+    
+    // Protection anti-doublons
+    const messageSignature = `${senderId}_${args.trim().toLowerCase()}`;
+    const currentTime = Date.now();
+    
+    if (recentMessages.has(messageSignature)) {
+        const lastProcessed = recentMessages.get(messageSignature);
+        if (currentTime - lastProcessed < 30000) {
+            log.warning(`🚫 Message dupliqué ignoré pour ${senderId}`);
+            return;
+        }
+    }
+    
+    if (activeRequests.has(senderId)) {
+        log.warning(`🚫 Demande en cours ignorée pour ${senderId}`);
+        return;
+    }
+    
+    // Délai de 5 secondes entre messages
+    const lastMessageTime = Array.from(recentMessages.entries())
+        .filter(([sig]) => sig.startsWith(`${senderId}_`))
+        .map(([, timestamp]) => timestamp)
+        .sort((a, b) => b - a)[0] || 0;
+        
+    if (lastMessageTime && (currentTime - lastMessageTime < 5000)) {
+        const waitMessage = "🕒 Veuillez patienter 5 secondes avant d'envoyer un nouveau message...";
+        addToMemory(String(senderId), 'assistant', waitMessage);
+        await ctx.sendMessage(senderId, waitMessage);
+        return;
+    }
+    
+    activeRequests.set(senderId, `${senderId}_${currentTime}`);
+    recentMessages.set(messageSignature, currentTime);
+    
+    // Nettoyage cache ancien
+    for (const [signature, timestamp] of recentMessages.entries()) {
+        if (currentTime - timestamp > 120000) {
+            recentMessages.delete(signature);
+        }
+    }
+    
+    try {
+        // Message de traitement
+        if (args.trim() && !isContinuationRequest(args)) {
+            const processingMessage = "🕒 Traitement en cours...";
+            addToMemory(String(senderId), 'assistant', processingMessage);
+            await ctx.sendMessage(senderId, processingMessage);
+        }
+        
+        if (!args.trim()) {
+            const welcomeMsg = "💬 Salut je suis NakamaBot! Je suis là pour toi ! Dis-moi ce qui t'intéresse et on va avoir une conversation géniale ! ✨";
+            const styledWelcome = parseMarkdown(welcomeMsg);
+            addToMemory(String(senderId), 'assistant', styledWelcome);
+            return styledWelcome;
+        }
+        
+        // 🆕 RÉCUPÉRER L'HISTORIQUE COMPLET pour analyse contextuelle
+        const conversationHistory = getMemoryContext(String(senderId)).slice(-10); // 10 derniers messages
+        
+        // Gestion continuation
+        const senderIdStr = String(senderId);
+        if (isContinuationRequest(args)) {
+            const truncatedData = truncatedMessages.get(senderIdStr);
+            if (truncatedData) {
+                const { fullMessage, lastSentPart } = truncatedData;
+                const lastSentIndex = fullMessage.indexOf(lastSentPart) + lastSentPart.length;
+                const remainingMessage = fullMessage.substring(lastSentIndex);
+                
+                if (remainingMessage.trim()) {
+                    const chunks = splitMessageIntoChunks(remainingMessage, 2000);
+                    const nextChunk = parseMarkdown(chunks[0]);
+                    
+                    if (chunks.length > 1) {
+                        truncatedMessages.set(senderIdStr, {
+                            fullMessage,
+                            lastSentPart: lastSentPart + chunks[0],
+                            timestamp: new Date().toISOString()
+                        });
+                        
+                        const continuationMsg = nextChunk + "\n\n📝 *Tape \"continue\" pour la suite...*";
+                        addToMemory(senderIdStr, 'user', args);
+                        addToMemory(senderIdStr, 'assistant', continuationMsg);
+                        return continuationMsg;
+                    } else {
+                        truncatedMessages.delete(senderIdStr);
+                        addToMemory(senderIdStr, 'user', args);
+                        addToMemory(senderIdStr, 'assistant', nextChunk);
+                        return nextChunk;
+                    }
+                } else {
+                    truncatedMessages.delete(senderIdStr);
+                    const endMsg = "✅ C'est tout ! Y a-t-il autre chose que je puisse faire pour toi ? 💫";
+                    addToMemory(senderIdStr, 'user', args);
+                    addToMemory(senderIdStr, 'assistant', endMsg);
+                    return endMsg;
+                }
+            } else {
+                const noTruncMsg = "🤔 Il n'y a pas de message en cours à continuer. Pose-moi une nouvelle question ! 💡";
+                addToMemory(senderIdStr, 'user', args);
+                addToMemory(senderIdStr, 'assistant', noTruncMsg);
+                return noTruncMsg;
+            }
+        }
+        
+        // Détection contact admin
+        const contactIntention = detectContactAdminIntention(args);
+        if (contactIntention.shouldContact) {
+            log.info(`📞 Intention contact admin: ${contactIntention.reason}`);
+            const contactSuggestion = generateContactSuggestion(contactIntention.reason, contactIntention.extractedMessage);
+            const styledContact = parseMarkdown(contactSuggestion);
+            
+            addToMemory(String(senderId), 'user', args);
+            addToMemory(String(senderId), 'assistant', styledContact);
+            return styledContact;
+        }
+        
+        // 🆕 DÉTECTION COMMANDES 100% IA avec historique
+        const intelligentCommand = await detectIntelligentCommands(args, conversationHistory, ctx);
+        if (intelligentCommand.shouldExecute) {
+            log.info(`🧠 Commande IA détectée: /${intelligentCommand.command} (${intelligentCommand.confidence})`);
+            
+            try {
+                const commandResult = await executeCommandFromChat(senderId, intelligentCommand.command, intelligentCommand.args, ctx);
+                
+                if (commandResult.success) {
+                    if (typeof commandResult.result === 'object' && commandResult.result.type === 'image') {
+                        addToMemory(String(senderId), 'user', args);
+                        return commandResult.result;
+                    }
+                    
+                    const contextualResponse = await generateContextualResponse(args, commandResult.result, intelligentCommand.command, ctx);
+                    const styledResponse = parseMarkdown(contextualResponse);
+                    
+                    addToMemory(String(senderId), 'user', args);
+                    addToMemory(String(senderId), 'assistant', styledResponse);
+                    return styledResponse;
+                }
+            } catch (error) {
+                log.error(`❌ Erreur commande IA: ${error.message}`);
+            }
+        }
+        
+        // 🆕 DÉCISION RECHERCHE AVEC MÉMOIRE CONTEXTUELLE
+        const searchDecision = await decideSearchNecessity(args, senderId, conversationHistory, ctx);
+        
+        if (searchDecision.needsExternalSearch) {
+            log.info(`🔍 Recherche externe nécessaire: ${searchDecision.reason}`);
+            if (searchDecision.usesConversationMemory) {
+                log.info(`🧠 Requête enrichie avec mémoire: "${searchDecision.searchQuery}"`);
+            }
+            
+            try {
+                const searchResults = await performIntelligentSearch(searchDecision.searchQuery, ctx);
+                
+                if (searchResults && searchResults.length > 0) {
+                    const naturalResponse = await generateNaturalResponseWithContext(args, searchResults, conversationHistory, ctx);
+                    
+                    if (naturalResponse) {
+                        const styledNatural = parseMarkdown(naturalResponse);
+                        
+                        if (styledNatural.length > 2000) {
+                            const chunks = splitMessageIntoChunks(styledNatural, 2000);
+                            const firstChunk = chunks[0];
+                            
+                            if (chunks.length > 1) {
+                                truncatedMessages.set(senderIdStr, {
+                                    fullMessage: styledNatural,
+                                    lastSentPart: firstChunk,
+                                    timestamp: new Date().toISOString()
+                                });
+                                
+                                const truncatedResponse = firstChunk + "\n\n📝 *Tape \"continue\" pour la suite...*";
+                                addToMemory(String(senderId), 'user', args);
+                                addToMemory(String(senderId), 'assistant', truncatedResponse);
+                                return truncatedResponse;
+                            }
+                        }
+                        
+                        addToMemory(String(senderId), 'user', args);
+                        addToMemory(String(senderId), 'assistant', styledNatural);
+                        log.info(`🔍✅ Recherche contextuelle terminée avec succès`);
+                        return styledNatural;
+                    }
+                }
+            } catch (searchError) {
+                log.error(`❌ Erreur recherche: ${searchError.message}`);
+            }
+        }
+        
+        // Conversation classique avec mémoire
+        return await handleConversationWithFallback(senderId, args, ctx);
+        
+    } finally {
+        activeRequests.delete(senderId);
+        log.debug(`🔓 Demande libérée pour ${senderId}`);
+    }
+};
+
+// ========================================
 // 📤 EXPORTS
 // ========================================
 
@@ -1204,11 +1262,11 @@ module.exports.detectContactAdminIntention = detectContactAdminIntention;
 module.exports.decideSearchNecessity = decideSearchNecessity;
 module.exports.performIntelligentSearch = performIntelligentSearch;
 module.exports.generateNaturalResponseWithContext = generateNaturalResponseWithContext;
+module.exports.analyzeConversationContext = analyzeConversationContext;
 module.exports.callGeminiWithRotation = callGeminiWithRotation;
 module.exports.getNextGeminiKey = getNextGeminiKey;
 module.exports.markKeyAsFailed = markKeyAsFailed;
 module.exports.parseMarkdown = parseMarkdown;
 module.exports.toBold = toBold;
-module.exports.toItalic = toItalic;
 module.exports.toUnderline = toUnderline;
 module.exports.toStrikethrough = toStrikethrough;
