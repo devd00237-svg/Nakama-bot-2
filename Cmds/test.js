@@ -14,24 +14,13 @@ const axios = require("axios");
 // Configuration APIs avec rotation des clés Gemini
 const GEMINI_API_KEYS = process.env.GEMINI_API_KEY ? process.env.GEMINI_API_KEY.split(',').map(key => key.trim()) : [];
 
-// Configuration APIs avec rotation des clés Google Search (similaire à Gemini)
-const GOOGLE_SEARCH_API_KEYS = process.env.GOOGLE_SEARCH_API_KEYS ? process.env.GOOGLE_SEARCH_API_KEYS.split(',').map(key => key.trim()) : [];
-const GOOGLE_SEARCH_ENGINE_IDS = process.env.GOOGLE_SEARCH_ENGINE_IDS ? process.env.GOOGLE_SEARCH_ENGINE_IDS.split(',').map(id => id.trim()) : [];
-
 // Configuration des délais pour la rotation et les retries
 const SEARCH_RETRY_DELAY = 9000; // Délai en ms entre tentatives de rotation (ex. : 3 secondes)
 const SEARCH_GLOBAL_COOLDOWN = 9000; // Délai optionnel global entre recherches (ex. : 5 secondes), si besoin
 
-// Fallback: SerpAPI si Google Custom Search n'est pas disponible
-const SERPAPI_KEY = process.env.SERPAPI_KEY;
-
 // État global pour la rotation des clés Gemini
 let currentGeminiKeyIndex = 0;
 const failedKeys = new Set();
-
-// État global pour la rotation des clés Google Search
-let currentSearchKeyIndex = 0;
-const failedSearchKeys = new Set();
 
 // 🛡️ PROTECTION ANTI-DOUBLONS RENFORCÉE: Map pour tracker les demandes en cours
 const activeRequests = new Map();
@@ -211,88 +200,6 @@ async function callGeminiWithRotation(prompt, maxRetries = GEMINI_API_KEYS.lengt
     }
     
     throw lastError || new Error('Toutes les clés Gemini ont échoué');
-}
-
-// 🆕 FONCTIONS POUR ROTATION GOOGLE SEARCH (similaire à Gemini)
-
-// Fonction pour obtenir la prochaine paire clé API / Engine ID disponible
-function getNextSearchPair() {
-    if (GOOGLE_SEARCH_API_KEYS.length === 0 || GOOGLE_SEARCH_ENGINE_IDS.length === 0 || GOOGLE_SEARCH_API_KEYS.length !== GOOGLE_SEARCH_ENGINE_IDS.length) {
-        throw new Error('Configuration Google Search invalide : tableaux de clés et IDs vides ou de tailles différentes');
-    }
-    
-    // Si toutes les clés ont échoué, on reset
-    if (failedSearchKeys.size >= GOOGLE_SEARCH_API_KEYS.length) {
-        // AJOUT : Délai avant reset complet pour éviter les boucles rapides
-        new Promise(resolve => setTimeout(resolve, SEARCH_RETRY_DELAY)); // Note : non-await, car sync function
-        failedSearchKeys.clear();
-        currentSearchKeyIndex = 0;
-    }
-    
-    // Trouver la prochaine clé non défaillante
-    let attempts = 0;
-    while (attempts < GOOGLE_SEARCH_API_KEYS.length) {
-        const apiKey = GOOGLE_SEARCH_API_KEYS[currentSearchKeyIndex];
-        const engineId = GOOGLE_SEARCH_ENGINE_IDS[currentSearchKeyIndex];
-        currentSearchKeyIndex = (currentSearchKeyIndex + 1) % GOOGLE_SEARCH_API_KEYS.length;
-        
-        if (!failedSearchKeys.has(apiKey)) {
-            return { apiKey, engineId };
-        }
-        attempts++;
-    }
-    
-    // Si toutes les clés sont marquées comme défaillantes, prendre la première quand même
-    failedSearchKeys.clear();
-    currentSearchKeyIndex = 0;
-    return { apiKey: GOOGLE_SEARCH_API_KEYS[0], engineId: GOOGLE_SEARCH_ENGINE_IDS[0] };
-}
-
-// Fonction pour marquer une clé Google Search comme défaillante
-function markSearchKeyAsFailed(apiKey) {
-    failedSearchKeys.add(apiKey);
-}
-
-// Fonction pour appeler Google Custom Search avec rotation automatique des clés
-async function callGoogleSearchWithRotation(query, log, maxRetries = GOOGLE_SEARCH_API_KEYS.length) {
-    let lastError = null;
-    
-    for (let attempt = 0; attempt < maxRetries; attempt++) {
-        if (attempt > 0) {
-            // AJOUT : Délai entre tentatives pour éviter les limites de taux
-            await new Promise(resolve => setTimeout(resolve, SEARCH_RETRY_DELAY));
-            log.info(`⌛ Délai de ${SEARCH_RETRY_DELAY / 1000} secondes avant retry #${attempt}`);
-        }
-        
-        try {
-            const { apiKey, engineId } = getNextSearchPair();
-            const results = await googleCustomSearch(query, log, apiKey, engineId);
-            
-            if (results && results.length > 0) {
-                // Succès - retirer la clé des clés défaillantes si elle y était
-                failedSearchKeys.delete(apiKey);
-                return results;
-            }
-            
-            throw new Error('Résultats Google Search vides');
-            
-        } catch (error) {
-            lastError = error;
-            
-            // Marquer la clé actuelle comme défaillante si c'est une erreur d'API
-            if (error.message.includes('API_KEY') || error.message.includes('quota') || error.message.includes('limit') || error.response?.status === 429 || error.response?.status === 403) {
-                const currentKey = GOOGLE_SEARCH_API_KEYS[(currentSearchKeyIndex - 1 + GOOGLE_SEARCH_API_KEYS.length) % GOOGLE_SEARCH_API_KEYS.length];
-                markSearchKeyAsFailed(currentKey);
-            }
-            
-            // Si c'est la dernière tentative, on lance l'erreur
-            if (attempt === maxRetries - 1) {
-                throw lastError;
-            }
-        }
-    }
-    
-    throw lastError || new Error('Toutes les clés Google Search ont échoué');
 }
 
 // 🛡️ FONCTION PRINCIPALE AVEC PROTECTION ANTI-DOUBLONS, TRONCATURE SYNCHRONISÉE ET DÉLAI DE 5 SECONDES
@@ -620,25 +527,19 @@ function detectSearchKeywords(message) {
     };
 }
 
-// 🆕 RECHERCHE INTELLIGENTE: Utilise Google Custom Search ou SerpAPI
+// 🆕 RECHERCHE INTELLIGENTE: Utilise DuckDuckGo Instant Answers API (gratuite, sans clé API)
 async function performIntelligentSearch(query, ctx) {
     const { log } = ctx;
     
     try {
-        // Priorité 1: Google Custom Search API avec rotation
-        if (GOOGLE_SEARCH_API_KEYS.length > 0 && GOOGLE_SEARCH_ENGINE_IDS.length > 0 && GOOGLE_SEARCH_API_KEYS.length === GOOGLE_SEARCH_ENGINE_IDS.length) {
-            return await callGoogleSearchWithRotation(query, log);
-        } else if (GOOGLE_SEARCH_API_KEYS.length !== GOOGLE_SEARCH_ENGINE_IDS.length) {
-            log.warning('⚠️ Tailles des tableaux Google Search API keys et Engine IDs ne correspondent pas - Skip rotation');
+        // Priorité 1: DuckDuckGo Instant Answers API (gratuite, sans clé, en temps réel)
+        const duckResults = await duckDuckGoSearch(query, log);
+        if (duckResults && duckResults.length > 0) {
+            return duckResults;
         }
         
-        // Priorité 2: SerpAPI (fallback)
-        if (SERPAPI_KEY) {
-            return await serpApiSearch(query, log);
-        }
-        
-        // Priorité 3: Recherche existante du bot (fallback)
-        log.warning('⚠️ Aucune API de recherche configurée, utilisation webSearch existant');
+        // Priorité 2: Recherche existante du bot (fallback)
+        log.warning('⚠️ Aucun résultat DuckDuckGo, utilisation webSearch existant');
         return await fallbackWebSearch(query, ctx);
         
     } catch (error) {
@@ -647,57 +548,41 @@ async function performIntelligentSearch(query, ctx) {
     }
 }
 
-// 🆕 Google Custom Search API (modifiée pour prendre apiKey et cx en params)
-async function googleCustomSearch(query, log, apiKey, cx) {
-    const url = `https://www.googleapis.com/customsearch/v1`;
+// 🆕 DuckDuckGo Instant Answers API (gratuite, sans clé API, supporte le français)
+async function duckDuckGoSearch(query, log) {
+    const url = `https://api.duckduckgo.com/`;
     const params = {
-        key: apiKey,
-        cx: cx,
         q: query,
-        num: 5,
-        safe: 'active',
-        lr: 'lang_fr',
-        hl: 'fr'
+        format: 'json',
+        kl: 'fr-fr',  // Langue française
+        no_redirect: 1,  // Éviter les redirections
+        no_html: 1  // Retourner du texte brut
     };
     
-    const response = await axios.get(url, { params, timeout: 10000 });
-    
-    if (response.data.items) {
-        return response.data.items.map(item => ({
-            title: item.title,
-            link: item.link,
-            description: item.snippet,
-            source: 'google'
-        }));
+    try {
+        const response = await axios.get(url, { params, timeout: 10000 });
+        
+        if (response.data && response.data.RelatedTopics && response.data.RelatedTopics.length > 0) {
+            return response.data.RelatedTopics.slice(0, 5).map(item => ({
+                title: item.Text || 'Résultat DuckDuckGo',
+                link: item.FirstURL || 'N/A',
+                description: item.Text || item.Result || 'Aucune description disponible',
+                source: 'duckduckgo'
+            }));
+        } else if (response.data.Abstract) {
+            return [{
+                title: response.data.Heading || 'Résultat principal',
+                link: response.data.AbstractURL || 'N/A',
+                description: response.data.Abstract,
+                source: 'duckduckgo'
+            }];
+        }
+        
+        return [];
+    } catch (error) {
+        log.warning(`⚠️ Erreur DuckDuckGo: ${error.message}`);
+        return [];
     }
-    
-    return [];
-}
-
-// 🆕 SerpAPI (alternative gratuite)
-async function serpApiSearch(query, log) {
-    const url = `https://serpapi.com/search`;
-    const params = {
-        api_key: SERPAPI_KEY,
-        engine: 'google',
-        q: query,
-        num: 5,
-        hl: 'fr',
-        gl: 'fr'
-    };
-    
-    const response = await axios.get(url, { params, timeout: 10000 });
-    
-    if (response.data.organic_results) {
-        return response.data.organic_results.map(item => ({
-            title: item.title,
-            link: item.link,
-            description: item.snippet,
-            source: 'serpapi'
-        }));
-    }
-    
-    return [];
 }
 
 // 🆕 Fallback sur la recherche existante
