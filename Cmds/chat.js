@@ -642,7 +642,7 @@ Réponds UNIQUEMENT avec ce JSON:
 // ========================================
 
 const VALID_COMMANDS = [
-    'help', 'image', 'vision', 'anime', 'music', 
+    'image', 'vision', 'anime', 'music', 
     'clan', 'rank', 'contact', 'weather'
 ];
 
@@ -665,11 +665,31 @@ ${recentHistory}
 
 MESSAGE ACTUEL: "${message}"
 
+⚠️ IMPORTANT: La commande /help est DÉJÀ intégrée dans le système conversationnel, ne la détecte PAS.
+
+VRAIES INTENTIONS DE COMMANDES (confidence >= 0.85):
+✅ /image: Demande EXPLICITE de CRÉER/GÉNÉRER une image, dessin, illustration (ex: "dessine-moi un chat", "génère une image de...")
+✅ /vision: Demande EXPLICITE d'ANALYSER une image déjà envoyée (ex: "décris cette image", "que vois-tu sur la photo")
+✅ /anime: Demande EXPLICITE de TRANSFORMER une image en style anime/manga (ex: "transforme en anime", "style manga")
+✅ /music: Demande EXPLICITE de RECHERCHER/JOUER une musique sur YouTube (ex: "joue la chanson...", "cherche musique de...")
+✅ /clan: Demande EXPLICITE liée aux clans du bot (ex: "créer un clan", "rejoindre clan", "bataille clan")
+✅ /rank: Demande EXPLICITE de voir ses STATISTIQUES personnelles dans le bot (ex: "mon niveau", "ma progression", "mon rang")
+✅ /contact: Demande EXPLICITE de CONTACTER les administrateurs (ex: "contacter admin", "envoyer message à Durand")
+✅ /weather: Demande EXPLICITE de MÉTÉO avec lieu précis (ex: "météo à Paris", "quel temps fait-il à Lyon")
+
+❌ FAUSSES DÉTECTIONS (NE PAS DÉTECTER):
+- Questions générales mentionnant un mot-clé: "quel chanteur a chanté cette musique" ≠ /music
+- Conversations normales: "j'aime la musique", "le temps passe", "aide mon ami", "besoin d'aide"
+- Descriptions: "cette image est belle", "il fait chaud", "niveau débutant"
+- Questions informatives: "c'est quoi la météo", "les clans vikings", "comment ça marche"
+- Demandes d'aide générale: "aide-moi", "j'ai besoin d'aide" ≠ /help (déjà intégré au système)
+
 RÈGLES STRICTES:
-1. L'utilisateur DOIT vouloir UTILISER une fonctionnalité du bot
-2. Il DOIT y avoir une DEMANDE D'ACTION claire
+1. L'utilisateur DOIT vouloir UTILISER une fonctionnalité SPÉCIFIQUE du bot
+2. Il DOIT y avoir une DEMANDE D'ACTION CLAIRE et DIRECTE
 3. Tenir compte du CONTEXTE conversationnel
-4. Ne détecte QUE si confidence >= 0.85
+4. Confidence MINIMUM 0.85 pour valider
+5. En cas de doute → NE PAS détecter de commande
 
 Réponds UNIQUEMENT avec ce JSON:
 {
@@ -1069,46 +1089,74 @@ function generateContactSuggestion(reason, extractedMessage) {
 // ========================================
 
 async function executeCommandFromChat(senderId, commandName, args, ctx) {
+    const { log } = ctx;
+    
     try {
+        log.info(`⚙️ Exécution de la commande /${commandName} avec args: "${args.substring(0, 100)}..."`);
+        
         const COMMANDS = global.COMMANDS || new Map();
         
-        if (!COMMANDS.has(commandName)) {
-            const path = require('path');
-            const fs = require('fs');
-            const commandPath = path.join(__dirname, `${commandName}.js`);
-            
-            if (fs.existsSync(commandPath)) {
-                delete require.cache[require.resolve(commandPath)];
-                const commandModule = require(commandPath);
-                
-                if (typeof commandModule === 'function') {
-                    const result = await commandModule(senderId, args, ctx);
-                    return { success: true, result };
-                }
-            }
-        } else {
+        // Vérifier si la commande est chargée dans global.COMMANDS
+        if (COMMANDS.has(commandName)) {
+            log.debug(`✅ Commande /${commandName} trouvée dans COMMANDS globales`);
             const commandFunction = COMMANDS.get(commandName);
             const result = await commandFunction(senderId, args, ctx);
+            log.info(`✅ Résultat commande /${commandName}: ${typeof result === 'object' ? 'Object' : result.substring(0, 100)}`);
             return { success: true, result };
         }
         
+        // Sinon, essayer de charger directement depuis le fichier
+        const path = require('path');
+        const fs = require('fs');
+        const commandPath = path.join(__dirname, `${commandName}.js`);
+        
+        if (fs.existsSync(commandPath)) {
+            log.debug(`✅ Fichier commande trouvé: ${commandPath}`);
+            delete require.cache[require.resolve(commandPath)];
+            const commandModule = require(commandPath);
+            
+            if (typeof commandModule === 'function') {
+                log.debug(`✅ Module commande chargé pour /${commandName}`);
+                const result = await commandModule(senderId, args, ctx);
+                log.info(`✅ Résultat commande /${commandName}: ${typeof result === 'object' ? 'Object' : result.substring(0, 100)}`);
+                return { success: true, result };
+            } else {
+                log.error(`❌ Le module ${commandName}.js n'exporte pas une fonction`);
+                return { success: false, error: `Module ${commandName} invalide` };
+            }
+        }
+        
+        log.error(`❌ Commande ${commandName} introuvable (ni dans COMMANDS ni en fichier)`);
         return { success: false, error: `Commande ${commandName} non trouvée` };
         
     } catch (error) {
+        log.error(`❌ Erreur fatale lors de l'exécution de /${commandName}: ${error.message}`);
+        log.error(`📊 Stack: ${error.stack}`);
         return { success: false, error: error.message };
     }
 }
 
 async function generateContextualResponse(originalMessage, commandResult, commandName, ctx) {
+    const { log } = ctx;
+    
+    // Si c'est une image, retourner directement
     if (typeof commandResult === 'object' && commandResult.type === 'image') {
+        log.debug(`🖼️ Résultat de type image pour /${commandName}, retour direct`);
+        return commandResult;
+    }
+    
+    // Si le résultat est déjà une réponse complète et naturelle, le retourner tel quel
+    if (typeof commandResult === 'string' && commandResult.length > 100) {
+        log.debug(`📝 Résultat /${commandName} déjà complet, retour direct`);
         return commandResult;
     }
     
     try {
-        const contextPrompt = `Utilisateur: "${originalMessage}"
-Résultat /${commandName}: "${commandResult}"
+        const contextPrompt = `L'utilisateur a dit: "${originalMessage}"
 
-Réponds naturellement et amicalement (max 400 chars). Markdown simple OK, pas d'italique.`;
+La commande /${commandName} a retourné: "${commandResult}"
+
+Réponds naturellement et amicalement pour présenter ce résultat (max 400 chars). Markdown simple OK (**gras**, listes), pas d'italique.`;
 
         let response;
         
@@ -1116,21 +1164,32 @@ Réponds naturellement et amicalement (max 400 chars). Markdown simple OK, pas d
         if (!checkIfAllGeminiKeysDead()) {
             try {
                 response = await callGeminiWithRotation(contextPrompt);
-                return response || commandResult;
+                if (response && response.trim()) {
+                    log.info(`💎 Réponse contextuelle Gemini pour /${commandName}`);
+                    return response;
+                }
             } catch (geminiError) {
-                // Continue vers Mistral
+                log.debug(`⚠️ Gemini échec réponse contextuelle: ${geminiError.message}`);
             }
         }
         
         // Fallback Mistral
         response = await ctx.callMistralAPI([
-            { role: "system", content: "Réponds naturellement. Markdown simple OK." },
-            { role: "user", content: `Utilisateur: "${originalMessage}"\nRésultat: "${commandResult}"\nPrésente naturellement (max 200 chars)` }
-        ], 200, 0.7);
+            { role: "system", content: "Tu es NakamaBot. Réponds naturellement pour présenter le résultat d'une commande. Markdown simple OK." },
+            { role: "user", content: `Utilisateur: "${originalMessage}"\n\nRésultat commande /${commandName}: "${commandResult}"\n\nPrésente naturellement (max 300 chars):` }
+        ], 300, 0.7);
         
-        return response || commandResult;
+        if (response && response.trim()) {
+            log.info(`🔄 Réponse contextuelle Mistral pour /${commandName}`);
+            return response;
+        }
+        
+        // Si tout échoue, retourner le résultat brut
+        log.warning(`⚠️ Échec génération réponse contextuelle, retour résultat brut`);
+        return commandResult;
         
     } catch (error) {
+        log.error(`❌ Erreur génération réponse contextuelle: ${error.message}`);
         return commandResult;
     }
 }
@@ -1258,30 +1317,43 @@ module.exports = async function cmdChat(senderId, args, ctx) {
             return styledContact;
         }
         
-        // Détection commandes IA
+        // Détection commandes IA (SAUF help qui est intégré au système)
         const intelligentCommand = await detectIntelligentCommands(args, conversationHistory, ctx);
         if (intelligentCommand.shouldExecute) {
             log.info(`🧠 Commande IA détectée: /${intelligentCommand.command} (${intelligentCommand.confidence})`);
+            log.info(`📝 Raison: ${intelligentCommand.reason}`);
+            log.info(`🎯 Arguments extraits: ${intelligentCommand.args.substring(0, 100)}...`);
             
             try {
                 const commandResult = await executeCommandFromChat(senderId, intelligentCommand.command, intelligentCommand.args, ctx);
                 
                 if (commandResult.success) {
+                    log.info(`✅ Commande /${intelligentCommand.command} exécutée avec succès`);
+                    
+                    // Si c'est une image, retourner directement
                     if (typeof commandResult.result === 'object' && commandResult.result.type === 'image') {
                         addToMemory(String(senderId), 'user', args);
+                        addToMemory(String(senderId), 'assistant', '[Image générée]');
                         return commandResult.result;
                     }
                     
+                    // Sinon, générer une réponse contextuelle
                     const contextualResponse = await generateContextualResponse(args, commandResult.result, intelligentCommand.command, ctx);
                     const styledResponse = parseMarkdown(contextualResponse);
                     
                     addToMemory(String(senderId), 'user', args);
                     addToMemory(String(senderId), 'assistant', styledResponse);
                     return styledResponse;
+                } else {
+                    log.error(`❌ Échec exécution commande /${intelligentCommand.command}: ${commandResult.error}`);
+                    // Continue vers la conversation normale en cas d'échec
                 }
             } catch (error) {
-                log.error(`❌ Erreur commande IA: ${error.message}`);
+                log.error(`❌ Erreur commande IA ${intelligentCommand.command}: ${error.message}`);
+                // Continue vers la conversation normale en cas d'erreur
             }
+        } else {
+            log.debug(`🔍 Aucune commande détectée dans: "${args.substring(0, 50)}..."`);
         }
         
         // Décision recherche avec mémoire
