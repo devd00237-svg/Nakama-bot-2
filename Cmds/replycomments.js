@@ -14,7 +14,7 @@ const GRAPH_API_VERSION = 'v19.0'; // Version actuelle de l'API Graph
 const PAGE_ID = process.env.PAGE_ID; // Ajoutez PAGE_ID dans votre .env (ID de la page Facebook)
 
 module.exports = async function cmdReplyComments(senderId, args, ctx) {
-    const { log, callGeminiWithRotation } = ctx;
+    const { log, callMistralAPI } = ctx;
     const ADMIN_IDS = new Set((process.env.ADMIN_IDS || "").split(",").map(id => id.trim()).filter(id => id));
 
     // Vérifier si l'utilisateur est admin
@@ -89,10 +89,16 @@ module.exports = async function cmdReplyComments(senderId, args, ctx) {
                 const hasPageReply = replies.some(reply => reply.from && reply.from.id === PAGE_ID);
 
                 if (!hasPageReply && comment.message) {
-                    // Étape 4: Générer une réponse via IA (Gemini)
-                    const prompt = `Tu es NakamaBot, une IA super gentille et amicale creer par Durand. Génère une réponse courte, positive et engageante à ce commentaire sur notre page Facebook : "${comment.message}". Maximum 100 caractères. Ajoute un emoji si pertinent.`;
+                    // Étape 4: Générer une réponse via IA (Mistral)
+                    const messages = [{
+                        role: "system",
+                        content: "Tu es NakamaBot, une IA super gentille et amicale. Génère une réponse courte, positive et engageante à ce commentaire sur notre page Facebook. Maximum 100 caractères. Ajoute un emoji si pertinent."
+                    }, {
+                        role: "user",
+                        content: `Commentaire : "${comment.message}"`
+                    }];
 
-                    const aiResponse = await callGeminiWithRotation(prompt);
+                    const aiResponse = await callMistralAPI(messages, 100, 0.7); // maxTokens=100, temperature=0.7 pour créativité modérée
 
                     if (aiResponse && aiResponse.trim()) {
                         // Étape 5: Poster la réponse
