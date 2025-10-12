@@ -1322,35 +1322,34 @@ module.exports = async function cmdChat(senderId, args, ctx) {
         if (intelligentCommand.shouldExecute) {
             log.info(`🧠 Commande IA détectée: /${intelligentCommand.command} (${intelligentCommand.confidence})`);
             log.info(`📝 Raison: ${intelligentCommand.reason}`);
-            log.info(`🎯 Arguments extraits: ${intelligentCommand.args.substring(0, 100)}...`);
+            log.info(`🎯 Redirection vers processCommand comme si l'user avait tapé /${intelligentCommand.command}`);
             
-            try {
-                const commandResult = await executeCommandFromChat(senderId, intelligentCommand.command, intelligentCommand.args, ctx);
-                
-                if (commandResult.success) {
-                    log.info(`✅ Commande /${intelligentCommand.command} exécutée avec succès`);
+            // 🔥 NOUVEAU: Rediriger vers processCommand EXACTEMENT comme si l'user avait tapé la commande
+            // Sauvegarder le message original dans la mémoire
+            addToMemory(String(senderId), 'user', args);
+            
+            // Construire la commande exacte comme si l'user l'avait tapée
+            const simulatedCommand = `/${intelligentCommand.command} ${intelligentCommand.args}`;
+            log.info(`🔄 Simulation commande: "${simulatedCommand}"`);
+            
+            // Libérer la requête active pour permettre processCommand de fonctionner
+            activeRequests.delete(senderId);
+            
+            // Appeler processCommand du contexte (celui du server.js)
+            if (ctx.processCommand) {
+                try {
+                    const commandResponse = await ctx.processCommand(senderId, simulatedCommand);
+                    log.info(`✅ Commande /${intelligentCommand.command} exécutée via processCommand`);
                     
-                    // Si c'est une image, retourner directement
-                    if (typeof commandResult.result === 'object' && commandResult.result.type === 'image') {
-                        addToMemory(String(senderId), 'user', args);
-                        addToMemory(String(senderId), 'assistant', '[Image générée]');
-                        return commandResult.result;
-                    }
-                    
-                    // Sinon, générer une réponse contextuelle
-                    const contextualResponse = await generateContextualResponse(args, commandResult.result, intelligentCommand.command, ctx);
-                    const styledResponse = parseMarkdown(contextualResponse);
-                    
-                    addToMemory(String(senderId), 'user', args);
-                    addToMemory(String(senderId), 'assistant', styledResponse);
-                    return styledResponse;
-                } else {
-                    log.error(`❌ Échec exécution commande /${intelligentCommand.command}: ${commandResult.error}`);
-                    // Continue vers la conversation normale en cas d'échec
+                    // Ne pas ajouter à la mémoire ici car processCommand le fait déjà
+                    return commandResponse;
+                } catch (error) {
+                    log.error(`❌ Erreur processCommand pour /${intelligentCommand.command}: ${error.message}`);
+                    // Continue vers conversation normale en cas d'erreur
                 }
-            } catch (error) {
-                log.error(`❌ Erreur commande IA ${intelligentCommand.command}: ${error.message}`);
-                // Continue vers la conversation normale en cas d'erreur
+            } else {
+                log.error(`❌ ctx.processCommand non disponible - impossible d'exécuter la commande`);
+                // Continue vers conversation normale
             }
         } else {
             log.debug(`🔍 Aucune commande détectée dans: "${args.substring(0, 50)}..."`);
