@@ -1,5 +1,6 @@
 /**
  * NakamaBot - Commande /chat avec MÉMOIRE CONTEXTUELLE et recherche GRATUITE
+ * VERSION 100% MISTRAL - Sans dépendance Gemini
  * + Détection commandes 100% IA (pas de mots-clés)
  * + Recherche contextuelle basée sur l'historique de conversation
  * + Support Markdown vers Unicode stylisé pour Facebook Messenger
@@ -9,15 +10,12 @@
  * @param {object} ctx - Contexte partagé du bot 
  */
 
-const { GoogleGenerativeAI } = require("@google/generative-ai");
 const axios = require("axios");
 const cheerio = require("cheerio");
 
 // ========================================
 // 🔑 CONFIGURATION APIs
 // ========================================
-
-const GEMINI_API_KEYS = process.env.GEMINI_API_KEY ? process.env.GEMINI_API_KEY.split(',').map(key => key.trim()) : [];
 
 // 🆕 RECHERCHE GRATUITE
 const SEARCH_CONFIG = {
@@ -44,8 +42,6 @@ const SEARCH_RETRY_DELAY = 2000;
 const SEARCH_GLOBAL_COOLDOWN = 3000;
 
 // État global
-let currentGeminiKeyIndex = 0;
-const failedKeys = new Set();
 const activeRequests = new Map();
 const recentMessages = new Map();
 const searchCache = new Map();
@@ -91,72 +87,6 @@ function parseMarkdown(text) {
     parsed = parsed.replace(/^[\s]*[-*]\s+(.+)$/gm, (match, content) => `• ${content.trim()}`);
     
     return parsed;
-}
-
-// ========================================
-// 🔑 GESTION ROTATION CLÉS GEMINI
-// ========================================
-
-function getNextGeminiKey() {
-    if (GEMINI_API_KEYS.length === 0) {
-        throw new Error('Aucune clé Gemini configurée');
-    }
-    
-    if (failedKeys.size >= GEMINI_API_KEYS.length) {
-        failedKeys.clear();
-        currentGeminiKeyIndex = 0;
-    }
-    
-    let attempts = 0;
-    while (attempts < GEMINI_API_KEYS.length) {
-        const key = GEMINI_API_KEYS[currentGeminiKeyIndex];
-        currentGeminiKeyIndex = (currentGeminiKeyIndex + 1) % GEMINI_API_KEYS.length;
-        
-        if (!failedKeys.has(key)) return key;
-        attempts++;
-    }
-    
-    failedKeys.clear();
-    currentGeminiKeyIndex = 0;
-    return GEMINI_API_KEYS[0];
-}
-
-function markKeyAsFailed(apiKey) {
-    failedKeys.add(apiKey);
-}
-
-async function callGeminiWithRotation(prompt, maxRetries = GEMINI_API_KEYS.length) {
-    let lastError = null;
-    
-    for (let attempt = 0; attempt < maxRetries; attempt++) {
-        try {
-            const apiKey = getNextGeminiKey();
-            const genAI = new GoogleGenerativeAI(apiKey);
-            const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash-exp" });
-            
-            const result = await model.generateContent(prompt);
-            const response = result.response.text();
-            
-            if (response && response.trim()) {
-                failedKeys.delete(apiKey);
-                return response;
-            }
-            
-            throw new Error('Réponse Gemini vide');
-            
-        } catch (error) {
-            lastError = error;
-            
-            if (error.message.includes('API_KEY') || error.message.includes('quota') || error.message.includes('limit')) {
-                const currentKey = GEMINI_API_KEYS[(currentGeminiKeyIndex - 1 + GEMINI_API_KEYS.length) % GEMINI_API_KEYS.length];
-                markKeyAsFailed(currentKey);
-            }
-            
-            if (attempt === maxRetries - 1) throw lastError;
-        }
-    }
-    
-    throw lastError || new Error('Toutes les clés Gemini ont échoué');
 }
 
 // ========================================
@@ -388,18 +318,13 @@ async function performIntelligentSearch(query, ctx) {
 }
 
 // ========================================
-// 🧠 ANALYSE CONTEXTUELLE DE CONVERSATION
+// 🧠 ANALYSE CONTEXTUELLE DE CONVERSATION (100% MISTRAL)
 // ========================================
 
-/**
- * 🆕 EXTRACTION DU CONTEXTE CONVERSATIONNEL
- * Analyse l'historique pour comprendre le sujet actuel et les entités mentionnées
- */
 async function analyzeConversationContext(senderId, currentMessage, conversationHistory, ctx) {
-    const { log } = ctx;
+    const { log, callMistralAPI } = ctx;
     
     try {
-        // Construire l'historique des 5 derniers messages
         const recentHistory = conversationHistory.slice(-5).map(msg => 
             `${msg.role === 'user' ? 'Utilisateur' : 'Bot'}: ${msg.content}`
         ).join('\n');
@@ -424,7 +349,7 @@ EXEMPLES:
 - Historique: "Qui est Messi ?" / Actuel: "combien de buts il a marqué ?"
   → Sujet: "Messi statistiques", Entités: ["Messi", "buts"], Intention: "continuation", Référence: "Messi (mentionné précédemment)"
 
-Réponds UNIQUEMENT avec ce JSON:
+Réponds UNIQUEMENT avec ce JSON (pas de texte avant ou après):
 {
   "mainTopic": "sujet_principal_complet",
   "entities": ["entité1", "entité2"],
@@ -433,13 +358,22 @@ Réponds UNIQUEMENT avec ce JSON:
   "enrichedQuery": "requête_de_recherche_enrichie_avec_contexte"
 }`;
 
-        const response = await callGeminiWithRotation(contextPrompt);
+        const messages = [
+            { role: "system", content: "Tu es un analyseur JSON. Réponds UNIQUEMENT avec du JSON valide, sans texte supplémentaire." },
+            { role: "user", content: contextPrompt }
+        ];
+        
+        const response = await callMistralAPI(messages, 500, 0.3);
+        
+        if (!response) {
+            throw new Error('Réponse Mistral vide');
+        }
+        
         const jsonMatch = response.match(/\{[\s\S]*\}/);
         
         if (jsonMatch) {
             const context = JSON.parse(jsonMatch[0]);
             
-            // Sauvegarder le contexte pour cet utilisateur
             conversationContext.set(senderId, {
                 lastTopic: context.mainTopic,
                 entities: context.entities,
@@ -460,7 +394,6 @@ Réponds UNIQUEMENT avec ce JSON:
     } catch (error) {
         log.warning(`⚠️ Erreur analyse contexte: ${error.message}`);
         
-        // Fallback: retourner le message brut
         return {
             mainTopic: currentMessage,
             entities: [],
@@ -472,17 +405,15 @@ Réponds UNIQUEMENT avec ce JSON:
 }
 
 // ========================================
-// 🤖 DÉCISION IA POUR RECHERCHE (AVEC CONTEXTE)
+// 🤖 DÉCISION IA POUR RECHERCHE (100% MISTRAL)
 // ========================================
 
 async function decideSearchNecessity(userMessage, senderId, conversationHistory, ctx) {
-    const { log } = ctx;
+    const { log, callMistralAPI } = ctx;
     
     try {
-        // 🆕 D'ABORD: Analyser le contexte conversationnel
         const contextAnalysis = await analyzeConversationContext(senderId, userMessage, conversationHistory, ctx);
         
-        // Construire l'historique pour la décision
         const recentHistory = conversationHistory.slice(-5).map(msg => 
             `${msg.role === 'user' ? 'Utilisateur' : 'Bot'}: ${msg.content}`
         ).join('\n');
@@ -523,7 +454,7 @@ Si recherche nécessaire ET que c'est une continuation contextuelle, ENRICHIS la
 Exemple: Message actuel "leur rang dans leur poule" + Contexte "Cameroun football" → Requête: "Cameroun classement poule football 2025"
 Si le sujet est sensible au temps (comme sports, actualités, événements) et qu'aucune date n'est spécifiée dans le message utilisateur ou le contexte, ajoute l'année actuelle (2025) à la searchQuery.
 
-Réponds UNIQUEMENT avec ce JSON:
+Réponds UNIQUEMENT avec ce JSON (pas de texte avant ou après):
 {
   "needsExternalSearch": true/false,
   "confidence": 0.0-1.0,
@@ -532,7 +463,17 @@ Réponds UNIQUEMENT avec ce JSON:
   "usesConversationMemory": true/false
 }`;
 
-        const response = await callGeminiWithRotation(decisionPrompt);
+        const messages = [
+            { role: "system", content: "Tu es un analyseur JSON. Réponds UNIQUEMENT avec du JSON valide, sans texte supplémentaire." },
+            { role: "user", content: decisionPrompt }
+        ];
+        
+        const response = await callMistralAPI(messages, 500, 0.3);
+        
+        if (!response) {
+            throw new Error('Réponse Mistral vide');
+        }
+        
         const jsonMatch = response.match(/\{[\s\S]*\}/);
         
         if (jsonMatch) {
@@ -553,7 +494,6 @@ Réponds UNIQUEMENT avec ce JSON:
     } catch (error) {
         log.warning(`⚠️ Erreur décision recherche: ${error.message}`);
         
-        // Fallback simple
         return {
             needsExternalSearch: false,
             confidence: 0.5,
@@ -565,7 +505,7 @@ Réponds UNIQUEMENT avec ce JSON:
 }
 
 // ========================================
-// 🎯 DÉTECTION COMMANDES 100% IA (PAS DE MOTS-CLÉS)
+// 🎯 DÉTECTION COMMANDES 100% IA MISTRAL
 // ========================================
 
 const VALID_COMMANDS = [
@@ -574,12 +514,11 @@ const VALID_COMMANDS = [
 ];
 
 async function detectIntelligentCommands(message, conversationHistory, ctx) {
-    const { log } = ctx;
+    const { log, callMistralAPI } = ctx;
     
     try {
         const commandsList = VALID_COMMANDS.map(cmd => `/${cmd}`).join(', ');
         
-        // Construire l'historique pour contexte
         const recentHistory = conversationHistory.slice(-3).map(msg => 
             `${msg.role === 'user' ? 'Utilisateur' : 'Bot'}: ${msg.content}`
         ).join('\n');
@@ -618,7 +557,7 @@ RÈGLES STRICTES:
 3. Tenir compte du CONTEXTE conversationnel (si on vient de parler de football et il dit "leur classement", ce n'est PAS une commande)
 4. Ne détecte une commande QUE si confidence >= 0.85
 
-Réponds UNIQUEMENT avec ce JSON:
+Réponds UNIQUEMENT avec ce JSON (pas de texte avant ou après):
 {
   "isCommand": true/false,
   "command": "nom_commande_ou_null",
@@ -628,13 +567,22 @@ Réponds UNIQUEMENT avec ce JSON:
   "conversationContext": "analyse_du_contexte"
 }`;
 
-        const response = await callGeminiWithRotation(detectionPrompt);
+        const messages = [
+            { role: "system", content: "Tu es un analyseur JSON. Réponds UNIQUEMENT avec du JSON valide, sans texte supplémentaire." },
+            { role: "user", content: detectionPrompt }
+        ];
+        
+        const response = await callMistralAPI(messages, 500, 0.3);
+        
+        if (!response) {
+            throw new Error('Réponse Mistral vide');
+        }
+        
         const jsonMatch = response.match(/\{[\s\S]*\}/);
         
         if (jsonMatch) {
             const aiDetection = JSON.parse(jsonMatch[0]);
             
-            // Validation stricte: seuil élevé de 0.85
             const isValid = aiDetection.isCommand && 
                           VALID_COMMANDS.includes(aiDetection.command) && 
                           aiDetection.confidence >= 0.85;
@@ -649,7 +597,7 @@ Réponds UNIQUEMENT avec ce JSON:
                     command: aiDetection.command,
                     args: aiDetection.extractedArgs,
                     confidence: aiDetection.confidence,
-                    method: 'ai_100percent'
+                    method: 'ai_100percent_mistral'
                 };
             } else if (aiDetection.confidence > 0.4 && aiDetection.confidence < 0.85) {
                 log.info(`🚫 Commande rejetée (confidence ${aiDetection.confidence}): ${aiDetection.reason}`);
@@ -665,7 +613,7 @@ Réponds UNIQUEMENT avec ce JSON:
 }
 
 // ========================================
-// 🎭 GÉNÉRATION RÉPONSE AVEC CONTEXTE
+// 🎭 GÉNÉRATION RÉPONSE AVEC CONTEXTE (100% MISTRAL)
 // ========================================
 
 async function generateNaturalResponseWithContext(originalQuery, searchResults, conversationContext, ctx) {
@@ -725,59 +673,34 @@ Actuel: "leur rang dans leur poule" → Bot: "Le Cameroun est 2ème de sa poule 
 
 RÉPONSE NATURELLE EN CONTINUITÉ:`;
 
-        const response = await callGeminiWithRotation(contextualPrompt);
+        const messages = [
+            { role: "system", content: "Tu es NakamaBot, super gentille et amicale. Réponds naturellement avec la mémoire complète de la conversation." },
+            { role: "user", content: contextualPrompt }
+        ];
+        
+        const response = await callMistralAPI(messages, 2000, 0.7);
         
         if (response && response.trim()) {
-            log.info(`🎭 Réponse contextuelle Gemini générée`);
+            log.info(`🎭 Réponse contextuelle Mistral générée`);
             return response;
         }
         
-        throw new Error('Réponse Gemini vide');
+        throw new Error('Réponse Mistral vide');
         
-    } catch (geminiError) {
-        log.warning(`⚠️ Gemini échec: ${geminiError.message}`);
+    } catch (error) {
+        log.error(`❌ Erreur génération réponse: ${error.message}`);
         
-        try {
-            const messages = [{
-                role: "system",
-                content: `Tu es NakamaBot avec MÉMOIRE COMPLÈTE. Tu connais tout l'historique. Réponds naturellement en tenant compte du contexte. Ne mentionne JAMAIS de recherches. Markdown simple OK.
-
-Historique complet:
-${conversationContext ? conversationContext.map(msg => `${msg.role === 'user' ? 'Utilisateur' : 'NakamaBot'}: ${msg.content}`).join('\n') : "Début"}`
-            }, {
-                role: "user", 
-                content: `Question actuelle: "${originalQuery}"
-
-Informations trouvées:
-${searchResults.map(r => `${r.title}: ${r.description}`).join('\n')}
-
-Réponds naturellement en continuité de la conversation, comme si tu connaissais déjà ces infos (max 2000 chars):`
-            }];
-            
-            const mistralResponse = await callMistralAPI(messages, 2000, 0.7);
-            
-            if (mistralResponse) {
-                log.info(`🔄 Réponse contextuelle Mistral générée`);
-                return mistralResponse;
-            }
-            
-            throw new Error('Mistral échec aussi');
-            
-        } catch (mistralError) {
-            log.error(`❌ Erreur totale: ${mistralError.message}`);
-            
-            const topResult = searchResults[0];
-            if (topResult) {
-                return `D'après ce que je sais, ${topResult.description} 💡`;
-            }
-            
-            return null;
+        const topResult = searchResults[0];
+        if (topResult) {
+            return `D'après ce que je sais, ${topResult.description} 💡`;
         }
+        
+        return null;
     }
 }
 
 // ========================================
-// 💬 CONVERSATION UNIFIÉE AVEC RECHERCHE INTÉGRÉE
+// 💬 CONVERSATION UNIFIÉE AVEC RECHERCHE INTÉGRÉE (100% MISTRAL)
 // ========================================
 
 async function handleConversationWithFallback(senderId, args, ctx, searchResults = null) {
@@ -805,7 +728,6 @@ async function handleConversationWithFallback(senderId, args, ctx, searchResults
         ).join('\n') + '\n';
     }
     
-    // 🆕 INJECTION DYNAMIQUE DES RÉSULTATS DE RECHERCHE
     let searchContext = "";
     if (searchResults && searchResults.length > 0) {
         searchContext = `\n\n🔍 INFORMATIONS RÉCENTES DISPONIBLES (utilise-les naturellement si pertinent):
@@ -860,10 +782,14 @@ Utilisateur: ${args}`;
     const senderIdStr = String(senderId);
 
     try {
-        const geminiResponse = await callGeminiWithRotation(systemPrompt);
+        const messages = [{ role: "system", content: systemPrompt }];
+        messages.push(...context);
+        messages.push({ role: "user", content: args });
         
-        if (geminiResponse && geminiResponse.trim()) {
-            const styledResponse = parseMarkdown(geminiResponse);
+        const mistralResponse = await callMistralAPI(messages, 2000, 0.75);
+        
+        if (mistralResponse && mistralResponse.trim()) {
+            const styledResponse = parseMarkdown(mistralResponse);
             
             if (styledResponse.length > 2000) {
                 const chunks = splitMessageIntoChunks(styledResponse, 2000);
@@ -879,67 +805,26 @@ Utilisateur: ${args}`;
                     const truncatedResponse = firstChunk + "\n\n📝 *Tape \"continue\" pour la suite...*";
                     addToMemory(senderIdStr, 'user', args);
                     addToMemory(senderIdStr, 'assistant', truncatedResponse);
-                    log.info(`💎 Gemini avec troncature${searchResults ? ' (+ recherche intégrée)' : ''}`);
+                    log.info(`💬 Mistral avec troncature${searchResults ? ' (+ recherche intégrée)' : ''}`);
                     return truncatedResponse;
                 }
             }
             
             addToMemory(senderIdStr, 'user', args);
             addToMemory(senderIdStr, 'assistant', styledResponse);
-            log.info(`💎 Gemini réponse normale${searchResults ? ' (+ recherche intégrée)' : ''}`);
+            log.info(`💬 Mistral réponse normale${searchResults ? ' (+ recherche intégrée)' : ''}`);
             return styledResponse;
         }
         
-        throw new Error('Réponse Gemini vide');
+        throw new Error('Réponse Mistral vide');
         
-    } catch (geminiError) {
-        log.warning(`⚠️ Gemini échec: ${geminiError.message}`);
+    } catch (error) {
+        log.error(`❌ Erreur Mistral: ${error.message}`);
         
-        try {
-            const messages = [{ role: "system", content: systemPrompt }];
-            messages.push(...context);
-            messages.push({ role: "user", content: args });
-            
-            const mistralResponse = await callMistralAPI(messages, 2000, 0.75);
-            
-            if (mistralResponse) {
-                const styledResponse = parseMarkdown(mistralResponse);
-                
-                if (styledResponse.length > 2000) {
-                    const chunks = splitMessageIntoChunks(styledResponse, 2000);
-                    const firstChunk = chunks[0];
-                    
-                    if (chunks.length > 1) {
-                        truncatedMessages.set(senderIdStr, {
-                            fullMessage: styledResponse,
-                            lastSentPart: firstChunk,
-                            timestamp: new Date().toISOString()
-                        });
-                        
-                        const truncatedResponse = firstChunk + "\n\n📝 *Tape \"continue\" pour la suite...*";
-                        addToMemory(senderIdStr, 'user', args);
-                        addToMemory(senderIdStr, 'assistant', truncatedResponse);
-                        log.info(`🔄 Mistral avec troncature${searchResults ? ' (+ recherche intégrée)' : ''}`);
-                        return truncatedResponse;
-                    }
-                }
-                
-                addToMemory(senderIdStr, 'user', args);
-                addToMemory(senderIdStr, 'assistant', styledResponse);
-                log.info(`🔄 Mistral fallback${searchResults ? ' (+ recherche intégrée)' : ''}`);
-                return styledResponse;
-            }
-            
-            throw new Error('Mistral échec');
-            
-        } catch (mistralError) {
-            log.error(`❌ Erreur totale: ${mistralError.message}`);
-            
-            const errorResponse = "🤔 J'ai rencontré une difficulté technique. Peux-tu reformuler ? 💫";
-            const styledError = parseMarkdown(errorResponse);
-            addToMemory(senderIdStr, 'assistant', styledError);
-            return styledError;
-        }
+        const errorResponse = "🤔 J'ai rencontré une difficulté technique. Peux-tu reformuler ? 💫";
+        const styledError = parseMarkdown(errorResponse);
+        addToMemory(senderIdStr, 'assistant', styledError);
+        return styledError;
     }
 }
 
@@ -1036,39 +921,35 @@ async function generateContextualResponse(originalMessage, commandResult, comman
         return commandResult;
     }
     
+    const { callMistralAPI } = ctx;
+    
     try {
         const contextPrompt = `Utilisateur: "${originalMessage}"
 Résultat /${commandName}: "${commandResult}"
 
 Réponds naturellement et amicalement (max 400 chars). Markdown simple OK, pas d'italique.`;
 
-        const response = await callGeminiWithRotation(contextPrompt);
+        const messages = [
+            { role: "system", content: "Réponds naturellement. Markdown simple OK." },
+            { role: "user", content: contextPrompt }
+        ];
+        
+        const response = await callMistralAPI(messages, 200, 0.7);
         return response || commandResult;
         
     } catch (error) {
-        const { callMistralAPI } = ctx;
-        try {
-            const response = await callMistralAPI([
-                { role: "system", content: "Réponds naturellement. Markdown simple OK." },
-                { role: "user", content: `Utilisateur: "${originalMessage}"\nRésultat: "${commandResult}"\nPrésente naturellement (max 200 chars)` }
-            ], 200, 0.7);
-            
-            return response || commandResult;
-        } catch (mistralError) {
-            return commandResult;
-        }
+        return commandResult;
     }
 }
 
 // ========================================
-// 🛡️ FONCTION PRINCIPALE AVEC MÉMOIRE
+// 🛡️ FONCTION PRINCIPALE AVEC MÉMOIRE (100% MISTRAL)
 // ========================================
 
 module.exports = async function cmdChat(senderId, args, ctx) {
-    const { addToMemory, getMemoryContext, callMistralAPI, log, 
+    const { addToMemory, getMemoryContext, log, 
             truncatedMessages, splitMessageIntoChunks, isContinuationRequest } = ctx;
     
-    // Protection anti-doublons
     const messageSignature = `${senderId}_${args.trim().toLowerCase()}`;
     const currentTime = Date.now();
     
@@ -1085,7 +966,6 @@ module.exports = async function cmdChat(senderId, args, ctx) {
         return;
     }
     
-    // Délai de 5 secondes entre messages
     const lastMessageTime = Array.from(recentMessages.entries())
         .filter(([sig]) => sig.startsWith(`${senderId}_`))
         .map(([, timestamp]) => timestamp)
@@ -1101,7 +981,6 @@ module.exports = async function cmdChat(senderId, args, ctx) {
     activeRequests.set(senderId, `${senderId}_${currentTime}`);
     recentMessages.set(messageSignature, currentTime);
     
-    // Nettoyage cache ancien
     for (const [signature, timestamp] of recentMessages.entries()) {
         if (currentTime - timestamp > 120000) {
             recentMessages.delete(signature);
@@ -1109,7 +988,6 @@ module.exports = async function cmdChat(senderId, args, ctx) {
     }
     
     try {
-        // Message de traitement
         if (args.trim() && !isContinuationRequest(args)) {
             const processingMessage = "🕒...";
             addToMemory(String(senderId), 'assistant', processingMessage);
@@ -1123,10 +1001,8 @@ module.exports = async function cmdChat(senderId, args, ctx) {
             return styledWelcome;
         }
         
-        // 🆕 RÉCUPÉRER L'HISTORIQUE COMPLET pour analyse contextuelle
-        const conversationHistory = getMemoryContext(String(senderId)).slice(-10); // 10 derniers messages
+        const conversationHistory = getMemoryContext(String(senderId)).slice(-10);
         
-        // Gestion continuation
         const senderIdStr = String(senderId);
         if (isContinuationRequest(args)) {
             const truncatedData = truncatedMessages.get(senderIdStr);
@@ -1171,7 +1047,6 @@ module.exports = async function cmdChat(senderId, args, ctx) {
             }
         }
         
-        // Détection contact admin
         const contactIntention = detectContactAdminIntention(args);
         if (contactIntention.shouldContact) {
             log.info(`📞 Intention contact admin: ${contactIntention.reason}`);
@@ -1183,7 +1058,6 @@ module.exports = async function cmdChat(senderId, args, ctx) {
             return styledContact;
         }
         
-        // 🆕 DÉTECTION COMMANDES 100% IA avec historique
         const intelligentCommand = await detectIntelligentCommands(args, conversationHistory, ctx);
         if (intelligentCommand.shouldExecute) {
             log.info(`🧠 Commande IA détectée: /${intelligentCommand.command} (${intelligentCommand.confidence})`);
@@ -1209,7 +1083,6 @@ module.exports = async function cmdChat(senderId, args, ctx) {
             }
         }
         
-        // 🆕 DÉCISION RECHERCHE AVEC MÉMOIRE CONTEXTUELLE (en arrière-plan)
         const searchDecision = await decideSearchNecessity(args, senderId, conversationHistory, ctx);
         
         let searchResults = null;
@@ -1220,7 +1093,6 @@ module.exports = async function cmdChat(senderId, args, ctx) {
             }
             
             try {
-                // Lancer la recherche en parallèle (ne bloque pas la conversation)
                 searchResults = await performIntelligentSearch(searchDecision.searchQuery, ctx);
                 
                 if (searchResults && searchResults.length > 0) {
@@ -1235,8 +1107,6 @@ module.exports = async function cmdChat(senderId, args, ctx) {
             }
         }
         
-        // 🆕 CONVERSATION UNIFIÉE: avec ou sans résultats de recherche
-        // La conversation continue naturellement, les résultats sont juste injectés si disponibles
         return await handleConversationWithFallback(senderId, args, ctx, searchResults);
         
     } finally {
@@ -1257,9 +1127,6 @@ module.exports.decideSearchNecessity = decideSearchNecessity;
 module.exports.performIntelligentSearch = performIntelligentSearch;
 module.exports.generateNaturalResponseWithContext = generateNaturalResponseWithContext;
 module.exports.analyzeConversationContext = analyzeConversationContext;
-module.exports.callGeminiWithRotation = callGeminiWithRotation;
-module.exports.getNextGeminiKey = getNextGeminiKey;
-module.exports.markKeyAsFailed = markKeyAsFailed;
 module.exports.parseMarkdown = parseMarkdown;
 module.exports.toBold = toBold;
 module.exports.toUnderline = toUnderline;
