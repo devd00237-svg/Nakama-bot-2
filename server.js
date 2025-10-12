@@ -1158,9 +1158,11 @@ const commandContext = {
     saveDataToGitHub,
     saveDataImmediate,
     loadDataFromGitHub,
-    createGitHubRepo
+    createGitHubRepo,
+    
+    // 🔥 CRITIQUE: Ajouter processCommand pour que chat.js puisse l'appeler
+    processCommand: null // Sera initialisé après la déclaration de la fonction
 };
-
 // ✅ FONCTION loadCommands MODIFIÉE pour capturer la commande rank
 function loadCommands() {
     const commandsDir = path.join(__dirname, 'Cmds');
@@ -1281,6 +1283,7 @@ async function processCommand(senderId, messageText) {
     
     if (COMMANDS.has(command)) {
         try {
+            log.info(`🎯 Exécution commande /${command} par ${senderId}`);
             return await COMMANDS.get(command)(senderId, args, commandContext);
         } catch (error) {
             log.error(`❌ Erreur commande ${command}: ${error.message}`);
@@ -1291,6 +1294,7 @@ async function processCommand(senderId, messageText) {
     return `❓ Oh ! La commande /${command} m'est inconnue ! Tape /help pour voir tout ce que je sais faire ! ✨💕`;
 }
 
+commandContext.processCommand = processCommand;
 // === ROUTES EXPRESS ===
 
 // === ROUTE D'ACCUEIL MISE À JOUR ===
