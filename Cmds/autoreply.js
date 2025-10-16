@@ -25,9 +25,10 @@ const AUTO_REPLY_CONFIG = {
     intervalMinutes: 10, // Vérifier toutes les 10 minutes
     maxCommentsPerRun: 5, // Maximum 5 commentaires par run
     responseDelay: 3000, // 3 secondes entre chaque réponse
-    maxCommentAge: 24, // Répondre aux commentaires de max 24h
+    maxCommentAge: 72, // Répondre aux commentaires de max 72h (augmenté)
     skipIfReplied: true, // Skip si déjà une réponse
     personality: 'friendly', // friendly, professional, enthusiastic
+    maxPostsToCheck: 20, // Vérifier les 20 derniers posts (augmenté)
 };
 
 // État global
@@ -120,8 +121,8 @@ async function getUnrepliedComments(log) {
             {
                 params: {
                     access_token: PAGE_ACCESS_TOKEN,
-                    fields: 'id,message,created_time',
-                    limit: 10 // 10 posts les plus récents
+                    fields: 'id,message,created_time,type',
+                    limit: AUTO_REPLY_CONFIG.maxPostsToCheck
                 },
                 timeout: 10000
             }
@@ -138,10 +139,17 @@ async function getUnrepliedComments(log) {
         const now = Date.now();
         const maxAge = AUTO_REPLY_CONFIG.maxCommentAge * 3600000; // Heures en ms
 
+        let accessiblePosts = 0;
+        let postsWithComments = 0;
+        let totalCommentsFound = 0;
+
         // Pour chaque post, récupérer les commentaires
         for (const post of postsResponse.data.data) {
             try {
-                log.debug(`🔍 Analyse post: ${post.id}`);
+                const postAge = now - new Date(post.created_time).getTime();
+                const postAgeHours = Math.round(postAge / 3600000);
+                
+                log.debug(`🔍 Post: ${post.id.split('_')[1]} | Type: ${post.type || 'unknown'} | Âge: ${postAgeHours}h`);
                 
                 const commentsResponse = await axios.get(
                     `https://graph.facebook.com/v21.0/${post.id}/comments`,
@@ -149,38 +157,48 @@ async function getUnrepliedComments(log) {
                         params: {
                             access_token: PAGE_ACCESS_TOKEN,
                             fields: 'id,from,message,created_time,comment_count',
-                            limit: 50,
-                            filter: 'stream' // Tous les commentaires
+                            limit: 100, // Augmenté à 100
+                            filter: 'stream'
                         },
                         timeout: 10000
                     }
                 );
 
+                accessiblePosts++;
+
                 if (commentsResponse.data.data && commentsResponse.data.data.length > 0) {
-                    log.info(`💬 ${commentsResponse.data.data.length} commentaires trouvés sur post ${post.id}`);
+                    postsWithComments++;
+                    totalCommentsFound += commentsResponse.data.data.length;
+                    
+                    log.info(`💬 ${commentsResponse.data.data.length} commentaire(s) sur post ${post.id.split('_')[1]}`);
                     
                     for (const comment of commentsResponse.data.data) {
                         const commentAge = now - new Date(comment.created_time).getTime();
+                        const commentAgeHours = Math.round(commentAge / 3600000);
+                        
+                        log.debug(`  📝 Commentaire ${comment.id}: "${comment.message.substring(0, 30)}..." | De: ${comment.from.name} | Âge: ${commentAgeHours}h | Réponses: ${comment.comment_count}`);
                         
                         // Filtres
                         if (commentAge > maxAge) {
-                            log.debug(`⏰ Commentaire trop vieux: ${comment.id}`);
+                            log.debug(`  ⏰ Trop vieux (${commentAgeHours}h > ${AUTO_REPLY_CONFIG.maxCommentAge}h)`);
                             continue;
                         }
                         if (processedComments.has(comment.id)) {
-                            log.debug(`✅ Commentaire déjà traité: ${comment.id}`);
+                            log.debug(`  ✅ Déjà traité`);
                             continue;
                         }
                         if (comment.from.id === realPageId) {
-                            log.debug(`🏠 Commentaire de la page elle-même: ${comment.id}`);
+                            log.debug(`  🏠 Commentaire de la page`);
                             continue;
                         }
                         
                         // Vérifier si déjà une réponse
                         if (AUTO_REPLY_CONFIG.skipIfReplied && comment.comment_count > 0) {
-                            log.debug(`💬 Commentaire déjà répondu: ${comment.id}`);
+                            log.debug(`  💬 Déjà répondu (${comment.comment_count} réponse(s))`);
                             continue;
                         }
+
+                        log.info(`  ✨ Commentaire éligible: "${comment.message.substring(0, 50)}..." de ${comment.from.name}`);
 
                         unrepliedComments.push({
                             id: comment.id,
@@ -193,23 +211,23 @@ async function getUnrepliedComments(log) {
                         });
                     }
                 } else {
-                    log.debug(`📭 Aucun commentaire sur post ${post.id}`);
+                    log.debug(`📭 Aucun commentaire sur ce post`);
                 }
 
-                // Petit délai entre chaque post pour éviter rate limit
+                // Délai entre chaque post
                 await new Promise(resolve => setTimeout(resolve, 1000));
 
             } catch (error) {
-                // Ne pas logger en WARNING si c'est une erreur 403 sur un post spécifique
                 if (error.response && error.response.status === 403) {
-                    log.debug(`🔒 Accès refusé au post ${post.id} (normal pour certains types de posts)`);
+                    log.debug(`🔒 Post ${post.id.split('_')[1]} inaccessible (403) - Type: ${post.type || 'unknown'}`);
                 } else {
-                    log.warning(`⚠️ Erreur récupération commentaires post ${post.id}: ${error.message}`);
+                    log.warning(`⚠️ Erreur post ${post.id}: ${error.message}`);
                 }
             }
         }
 
-        log.info(`📊 ${unrepliedComments.length} commentaires non répondus trouvés`);
+        log.info(`📊 Résumé: ${accessiblePosts}/${postsResponse.data.data.length} posts accessibles | ${postsWithComments} avec commentaires | ${totalCommentsFound} commentaires totaux | ${unrepliedComments.length} éligibles`);
+        
         return unrepliedComments.slice(0, AUTO_REPLY_CONFIG.maxCommentsPerRun);
 
     } catch (error) {
