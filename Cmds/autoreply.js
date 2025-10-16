@@ -58,24 +58,72 @@ function isAdmin(senderId) {
 }
 
 // ========================================
+// 🔍 DÉTECTION PAGE ID RÉEL
+// ========================================
+
+async function getRealPageId(log) {
+    try {
+        if (!PAGE_ACCESS_TOKEN) {
+            throw new Error('PAGE_ACCESS_TOKEN non configuré');
+        }
+
+        // Méthode 1: Utiliser /me pour obtenir les infos de la page
+        try {
+            const meResponse = await axios.get(
+                'https://graph.facebook.com/v21.0/me',
+                {
+                    params: {
+                        access_token: PAGE_ACCESS_TOKEN,
+                        fields: 'id,name,username'
+                    }
+                }
+            );
+
+            if (meResponse.data && meResponse.data.id) {
+                log.info(`✅ Page détectée: ${meResponse.data.name} (ID: ${meResponse.data.id})`);
+                return meResponse.data.id;
+            }
+        } catch (error) {
+            log.warning(`⚠️ Méthode /me échouée: ${error.message}`);
+        }
+
+        // Méthode 2: Utiliser le PAGE_ID configuré si fourni
+        if (PAGE_ID) {
+            log.info(`📌 Utilisation PAGE_ID configuré: ${PAGE_ID}`);
+            return PAGE_ID;
+        }
+
+        throw new Error('Impossible de déterminer le PAGE_ID');
+
+    } catch (error) {
+        log.error(`❌ Erreur getRealPageId: ${error.message}`);
+        throw error;
+    }
+}
+
+// ========================================
 // 📊 RÉCUPÉRATION COMMENTAIRES NON RÉPONDUS
 // ========================================
 
 async function getUnrepliedComments(log) {
     try {
-        if (!PAGE_ACCESS_TOKEN || !PAGE_ID) {
-            throw new Error('PAGE_ACCESS_TOKEN ou PAGE_ID non configuré');
+        if (!PAGE_ACCESS_TOKEN) {
+            throw new Error('PAGE_ACCESS_TOKEN non configuré');
         }
 
-        // Récupérer les posts récents de la page
+        // Déterminer le vrai PAGE_ID
+        const realPageId = await getRealPageId(log);
+
+        // Récupérer les posts récents de la page avec le bon ID
         const postsResponse = await axios.get(
-            `https://graph.facebook.com/v21.0/${PAGE_ID}/posts`,
+            `https://graph.facebook.com/v21.0/${realPageId}/posts`,
             {
                 params: {
                     access_token: PAGE_ACCESS_TOKEN,
                     fields: 'id,message,created_time',
                     limit: 10 // 10 posts les plus récents
-                }
+                },
+                timeout: 10000
             }
         );
 
@@ -84,6 +132,8 @@ async function getUnrepliedComments(log) {
             return [];
         }
 
+        log.info(`📝 ${postsResponse.data.data.length} posts trouvés`);
+
         const unrepliedComments = [];
         const now = Date.now();
         const maxAge = AUTO_REPLY_CONFIG.maxCommentAge * 3600000; // Heures en ms
@@ -91,6 +141,8 @@ async function getUnrepliedComments(log) {
         // Pour chaque post, récupérer les commentaires
         for (const post of postsResponse.data.data) {
             try {
+                log.debug(`🔍 Analyse post: ${post.id}`);
+                
                 const commentsResponse = await axios.get(
                     `https://graph.facebook.com/v21.0/${post.id}/comments`,
                     {
@@ -99,21 +151,34 @@ async function getUnrepliedComments(log) {
                             fields: 'id,from,message,created_time,comment_count',
                             limit: 50,
                             filter: 'stream' // Tous les commentaires
-                        }
+                        },
+                        timeout: 10000
                     }
                 );
 
-                if (commentsResponse.data.data) {
+                if (commentsResponse.data.data && commentsResponse.data.data.length > 0) {
+                    log.info(`💬 ${commentsResponse.data.data.length} commentaires trouvés sur post ${post.id}`);
+                    
                     for (const comment of commentsResponse.data.data) {
                         const commentAge = now - new Date(comment.created_time).getTime();
                         
                         // Filtres
-                        if (commentAge > maxAge) continue; // Trop vieux
-                        if (processedComments.has(comment.id)) continue; // Déjà traité
-                        if (comment.from.id === PAGE_ID) continue; // C'est la page elle-même
+                        if (commentAge > maxAge) {
+                            log.debug(`⏰ Commentaire trop vieux: ${comment.id}`);
+                            continue;
+                        }
+                        if (processedComments.has(comment.id)) {
+                            log.debug(`✅ Commentaire déjà traité: ${comment.id}`);
+                            continue;
+                        }
+                        if (comment.from.id === realPageId) {
+                            log.debug(`🏠 Commentaire de la page elle-même: ${comment.id}`);
+                            continue;
+                        }
                         
                         // Vérifier si déjà une réponse
                         if (AUTO_REPLY_CONFIG.skipIfReplied && comment.comment_count > 0) {
+                            log.debug(`💬 Commentaire déjà répondu: ${comment.id}`);
                             continue;
                         }
 
@@ -127,13 +192,20 @@ async function getUnrepliedComments(log) {
                             age: commentAge
                         });
                     }
+                } else {
+                    log.debug(`📭 Aucun commentaire sur post ${post.id}`);
                 }
 
                 // Petit délai entre chaque post pour éviter rate limit
-                await new Promise(resolve => setTimeout(resolve, 500));
+                await new Promise(resolve => setTimeout(resolve, 1000));
 
             } catch (error) {
-                log.warning(`⚠️ Erreur récupération commentaires post ${post.id}: ${error.message}`);
+                // Ne pas logger en WARNING si c'est une erreur 403 sur un post spécifique
+                if (error.response && error.response.status === 403) {
+                    log.debug(`🔒 Accès refusé au post ${post.id} (normal pour certains types de posts)`);
+                } else {
+                    log.warning(`⚠️ Erreur récupération commentaires post ${post.id}: ${error.message}`);
+                }
             }
         }
 
@@ -437,9 +509,32 @@ module.exports = async function cmdAutoReply(senderId, args, ctx) {
 
             case 'status': {
                 const status = getAutoReplyStatus();
+                
+                // Vérifier la page
+                let pageInfo = "Non détecté";
+                try {
+                    const pageId = await getRealPageId(log);
+                    const pageResponse = await axios.get(
+                        `https://graph.facebook.com/v21.0/${pageId}`,
+                        {
+                            params: {
+                                access_token: PAGE_ACCESS_TOKEN,
+                                fields: 'id,name,username'
+                            }
+                        }
+                    );
+                    if (pageResponse.data) {
+                        pageInfo = `${pageResponse.data.name} (${pageResponse.data.id})`;
+                    }
+                } catch (error) {
+                    pageInfo = `Erreur: ${error.message}`;
+                }
+
                 return `📊 𝗦𝘁𝗮𝘁𝘂𝘁 𝗔𝘂𝘁𝗼-𝗥𝗲𝗽𝗹𝘆
 
 ${status.enabled ? '✅ 𝗔𝗖𝗧𝗜𝗙' : '🛑 𝗜𝗡𝗔𝗖𝗧𝗜𝗙'}
+
+📄 𝗣𝗮𝗴𝗲: ${pageInfo}
 
 ⚙️ 𝗖𝗼𝗻𝗳𝗶𝗴𝘂𝗿𝗮𝘁𝗶𝗼𝗻:
 • Intervalle: ${status.intervalMinutes} minutes
@@ -493,6 +588,127 @@ ${status.enabled ? '✅ 𝗔𝗖𝗧𝗜𝗙' : '🛑 𝗜𝗡𝗔𝗖𝗧𝗜�
 ${result.success > 0 ? '✅ Auto-reply fonctionne !' : '⚠️ Aucun commentaire traité'}`;
             }
 
+            case 'debug': {
+                log.info(`🔍 Diagnostic auto-reply par ${senderId}`);
+                await sendMessage(senderId, "🔍 Diagnostic en cours...");
+                
+                let diagnostic = "🔍 𝗗𝗶𝗮𝗴𝗻𝗼𝘀𝘁𝗶𝗰 𝗔𝘂𝘁𝗼-𝗥𝗲𝗽𝗹𝘆\n\n";
+                
+                // 1. Vérifier PAGE_ACCESS_TOKEN
+                if (!PAGE_ACCESS_TOKEN) {
+                    diagnostic += "❌ PAGE_ACCESS_TOKEN: Non configuré\n";
+                } else {
+                    diagnostic += `✅ PAGE_ACCESS_TOKEN: Configuré (${PAGE_ACCESS_TOKEN.substring(0, 20)}...)\n`;
+                }
+                
+                // 2. Vérifier PAGE_ID
+                if (PAGE_ID) {
+                    diagnostic += `📋 PAGE_ID env: ${PAGE_ID}\n`;
+                } else {
+                    diagnostic += "⚠️ PAGE_ID env: Non configuré (sera auto-détecté)\n";
+                }
+                
+                // 3. Détecter le vrai PAGE_ID
+                try {
+                    const realPageId = await getRealPageId(log);
+                    diagnostic += `✅ PAGE_ID détecté: ${realPageId}\n`;
+                    
+                    // 4. Tester accès à la page
+                    try {
+                        const pageResponse = await axios.get(
+                            `https://graph.facebook.com/v21.0/${realPageId}`,
+                            {
+                                params: {
+                                    access_token: PAGE_ACCESS_TOKEN,
+                                    fields: 'id,name,username,access_token'
+                                },
+                                timeout: 10000
+                            }
+                        );
+                        
+                        diagnostic += `✅ Accès page: OK\n`;
+                        diagnostic += `📄 Nom page: ${pageResponse.data.name}\n`;
+                        if (pageResponse.data.username) {
+                            diagnostic += `🔗 Username: @${pageResponse.data.username}\n`;
+                        }
+                    } catch (error) {
+                        diagnostic += `❌ Accès page: ${error.message}\n`;
+                    }
+                    
+                    // 5. Tester accès aux posts
+                    try {
+                        const postsResponse = await axios.get(
+                            `https://graph.facebook.com/v21.0/${realPageId}/posts`,
+                            {
+                                params: {
+                                    access_token: PAGE_ACCESS_TOKEN,
+                                    fields: 'id,message,created_time',
+                                    limit: 5
+                                },
+                                timeout: 10000
+                            }
+                        );
+                        
+                        const postsCount = postsResponse.data.data ? postsResponse.data.data.length : 0;
+                        diagnostic += `✅ Accès posts: OK (${postsCount} posts récents)\n`;
+                        
+                        if (postsCount > 0) {
+                            // 6. Tester accès aux commentaires du premier post
+                            const firstPost = postsResponse.data.data[0];
+                            try {
+                                const commentsResponse = await axios.get(
+                                    `https://graph.facebook.com/v21.0/${firstPost.id}/comments`,
+                                    {
+                                        params: {
+                                            access_token: PAGE_ACCESS_TOKEN,
+                                            fields: 'id,from,message',
+                                            limit: 5
+                                        },
+                                        timeout: 10000
+                                    }
+                                );
+                                
+                                const commentsCount = commentsResponse.data.data ? commentsResponse.data.data.length : 0;
+                                diagnostic += `✅ Accès commentaires: OK (${commentsCount} commentaires sur 1er post)\n`;
+                                
+                                if (commentsCount > 0) {
+                                    diagnostic += `\n💬 𝗘𝘅𝗲𝗺𝗽𝗹𝗲 𝗰𝗼𝗺𝗺𝗲𝗻𝘁𝗮𝗶𝗿𝗲:\n`;
+                                    const firstComment = commentsResponse.data.data[0];
+                                    diagnostic += `• De: ${firstComment.from.name}\n`;
+                                    diagnostic += `• Message: ${firstComment.message.substring(0, 50)}...\n`;
+                                }
+                            } catch (error) {
+                                if (error.response && error.response.status === 403) {
+                                    diagnostic += `⚠️ Accès commentaires: Refusé (403) - Permissions insuffisantes\n`;
+                                    diagnostic += `💡 Vérifiez les permissions du token:\n`;
+                                    diagnostic += `   • pages_read_engagement\n`;
+                                    diagnostic += `   • pages_manage_posts\n`;
+                                    diagnostic += `   • pages_read_user_content\n`;
+                                } else {
+                                    diagnostic += `❌ Accès commentaires: ${error.message}\n`;
+                                }
+                            }
+                        } else {
+                            diagnostic += `📭 Aucun post récent sur la page\n`;
+                        }
+                    } catch (error) {
+                        diagnostic += `❌ Accès posts: ${error.message}\n`;
+                    }
+                    
+                } catch (error) {
+                    diagnostic += `❌ Détection PAGE_ID: ${error.message}\n`;
+                }
+                
+                // 7. Vérifier les permissions du token
+                diagnostic += `\n🔐 𝗣𝗲𝗿𝗺𝗶𝘀𝘀𝗶𝗼𝗻𝘀 𝗿𝗲𝗾𝘂𝗶𝘀𝗲𝘀:\n`;
+                diagnostic += `• pages_read_engagement ✓\n`;
+                diagnostic += `• pages_manage_posts ✓\n`;
+                diagnostic += `• pages_read_user_content ✓\n`;
+                diagnostic += `\n💡 Si erreur 403: Regénérez le token avec ces permissions sur developers.facebook.com`;
+                
+                return diagnostic;
+            }
+
             default: {
                 return `🤖 𝗔𝘂𝘁𝗼-𝗥𝗲𝗽𝗹𝘆 - 𝗔𝗱𝗺𝗶𝗻
 
@@ -504,15 +720,18 @@ Répond automatiquement aux commentaires non répondus sur la page Facebook.
 • /autoreply status - Voir le statut
 • /autoreply config - Voir la config
 • /autoreply test - Test manuel
+• /autoreply debug - Diagnostic complet
 
 ✨ 𝗙𝗼𝗻𝗰𝘁𝗶𝗼𝗻𝗻𝗮𝗹𝗶𝘁é𝘀:
 ✅ Réponses IA intelligentes (Gemini + Mistral)
+✅ Détection automatique de la page
 ✅ Filtrage contenu inapproprié
 ✅ Respect rate limits Facebook
 ✅ Personnalités adaptables
 ✅ Historique des commentaires traités
 
-⚠️ Nécessite: PAGE_ACCESS_TOKEN et PAGE_ID configurés`;
+⚠️ Nécessite: PAGE_ACCESS_TOKEN configuré
+📝 PAGE_ID optionnel (auto-détecté)`;
             }
         }
 
@@ -546,4 +765,5 @@ module.exports.startAutoReply = startAutoReply;
 module.exports.stopAutoReply = stopAutoReply;
 module.exports.getAutoReplyStatus = getAutoReplyStatus;
 module.exports.runAutoReplyProcess = runAutoReplyProcess;
+module.exports.getRealPageId = getRealPageId;
 module.exports.AUTO_REPLY_CONFIG = AUTO_REPLY_CONFIG;
