@@ -116,15 +116,17 @@ async function getUnrepliedComments(log) {
         const realPageId = await getRealPageId(log);
 
         // Récupérer les posts récents de la page avec le bon ID
+        log.debug(`📡 Récupération posts de la page ${realPageId}`);
+        
         const postsResponse = await axios.get(
-            `https://graph.facebook.com/v21.0/${realPageId}/posts`,
+            `https://graph.facebook.com/v21.0/${realPageId}/feed`,
             {
                 params: {
                     access_token: PAGE_ACCESS_TOKEN,
-                    fields: 'id,message,created_time,type',
+                    fields: 'id,message,created_time,story,type,status_type',
                     limit: AUTO_REPLY_CONFIG.maxPostsToCheck
                 },
-                timeout: 10000
+                timeout: 15000
             }
         );
 
@@ -149,18 +151,19 @@ async function getUnrepliedComments(log) {
                 const postAge = now - new Date(post.created_time).getTime();
                 const postAgeHours = Math.round(postAge / 3600000);
                 
-                log.debug(`🔍 Post: ${post.id.split('_')[1]} | Type: ${post.type || 'unknown'} | Âge: ${postAgeHours}h`);
+                const postText = post.message || post.story || '[Sans texte]';
+                log.debug(`🔍 Post: ${post.id.split('_')[1]} | Type: ${post.type || post.status_type || 'unknown'} | Âge: ${postAgeHours}h | "${postText.substring(0, 30)}..."`);
                 
                 const commentsResponse = await axios.get(
                     `https://graph.facebook.com/v21.0/${post.id}/comments`,
                     {
                         params: {
                             access_token: PAGE_ACCESS_TOKEN,
-                            fields: 'id,from,message,created_time,comment_count',
-                            limit: 100, // Augmenté à 100
-                            filter: 'stream'
+                            fields: 'id,from{id,name},message,created_time,comment_count',
+                            limit: 100,
+                            summary: true
                         },
-                        timeout: 10000
+                        timeout: 15000
                     }
                 );
 
@@ -232,6 +235,10 @@ async function getUnrepliedComments(log) {
 
     } catch (error) {
         log.error(`❌ Erreur getUnrepliedComments: ${error.message}`);
+        if (error.response) {
+            log.error(`📊 Status: ${error.response.status}`);
+            log.error(`📋 Data: ${JSON.stringify(error.response.data)}`);
+        }
         return [];
     }
 }
@@ -557,14 +564,19 @@ ${status.enabled ? '✅ 𝗔𝗖𝗧𝗜𝗙' : '🛑 𝗜𝗡𝗔𝗖𝗧𝗜�
 ⚙️ 𝗖𝗼𝗻𝗳𝗶𝗴𝘂𝗿𝗮𝘁𝗶𝗼𝗻:
 • Intervalle: ${status.intervalMinutes} minutes
 • Max commentaires/run: ${status.maxCommentsPerRun}
+• Max posts à vérifier: ${AUTO_REPLY_CONFIG.maxPostsToCheck}
+• Âge max commentaires: ${AUTO_REPLY_CONFIG.maxCommentAge}h
 • Personnalité: ${status.personality}
 • Commentaires traités: ${status.processedCount}
 
 🎮 𝗖𝗼𝗺𝗺𝗮𝗻𝗱𝗲𝘀:
-• /autoreply start - Démarrer
-• /autoreply stop - Arrêter
-• /autoreply config - Configuration
+• /autoreply start - Activer auto-reply
+• /autoreply stop - Désactiver auto-reply
+• /autoreply status - Voir le statut
+• /autoreply config - Voir la config
+• /autoreply scan - Scanner tous les commentaires
 • /autoreply test - Test manuel
+• /autoreply debug - Diagnostic complet
 
 📋 𝗥𝗲𝘀𝘁𝗿𝗶𝗰𝘁𝗶𝗼𝗻𝘀 𝗙𝗮𝗰𝗲𝗯𝗼𝗼𝗸:
 ✅ Conforme API Facebook
@@ -604,6 +616,139 @@ ${status.enabled ? '✅ 𝗔𝗖𝗧𝗜𝗙' : '🛑 𝗜𝗡𝗔𝗖𝗧𝗜�
 • Erreurs: ${result.errors}
 
 ${result.success > 0 ? '✅ Auto-reply fonctionne !' : '⚠️ Aucun commentaire traité'}`;
+            }
+
+            case 'scan': {
+                log.info(`🔍 Scan détaillé par ${senderId}`);
+                await sendMessage(senderId, "🔍 Scan en cours des commentaires...");
+                
+                try {
+                    const realPageId = await getRealPageId(log);
+                    
+                    // Récupérer les posts
+                    const postsResponse = await axios.get(
+                        `https://graph.facebook.com/v21.0/${realPageId}/feed`,
+                        {
+                            params: {
+                                access_token: PAGE_ACCESS_TOKEN,
+                                fields: 'id,message,created_time,story,type,status_type',
+                                limit: 20
+                            },
+                            timeout: 15000
+                        }
+                    );
+                    
+                    if (!postsResponse.data.data || postsResponse.data.data.length === 0) {
+                        return "📭 Aucun post trouvé sur la page";
+                    }
+                    
+                    let report = `🔍 𝗦𝗰𝗮𝗻 𝗱𝗲𝘀 ${postsResponse.data.data.length} 𝗱𝗲𝗿𝗻𝗶𝗲𝗿𝘀 𝗽𝗼𝘀𝘁𝘀\n\n`;
+                    
+                    let accessibleCount = 0;
+                    let withCommentsCount = 0;
+                    let totalComments = 0;
+                    let eligibleComments = 0;
+                    
+                    const now = Date.now();
+                    const maxAge = AUTO_REPLY_CONFIG.maxCommentAge * 3600000;
+                    
+                    for (let i = 0; i < Math.min(10, postsResponse.data.data.length); i++) {
+                        const post = postsResponse.data.data[i];
+                        const postAge = Math.round((now - new Date(post.created_time).getTime()) / 3600000);
+                        const postPreview = post.message || post.story || '[Sans texte]';
+                        
+                        report += `📄 𝗣𝗼𝘀𝘁 #${i + 1} (${postAge}h)\n`;
+                        report += `   "${postPreview.substring(0, 30)}..."\n`;
+                        report += `   Type: ${post.type || post.status_type || 'unknown'}\n`;
+                        
+                        try {
+                            const commentsResponse = await axios.get(
+                                `https://graph.facebook.com/v21.0/${post.id}/comments`,
+                                {
+                                    params: {
+                                        access_token: PAGE_ACCESS_TOKEN,
+                                        fields: 'id,from{id,name},message,created_time,comment_count',
+                                        limit: 100,
+                                        summary: true
+                                    },
+                                    timeout: 15000
+                                }
+                            );
+                            
+                            accessibleCount++;
+                            
+                            if (commentsResponse.data.data && commentsResponse.data.data.length > 0) {
+                                withCommentsCount++;
+                                totalComments += commentsResponse.data.data.length;
+                                
+                                let postEligible = 0;
+                                
+                                for (const comment of commentsResponse.data.data) {
+                                    const commentAge = now - new Date(comment.created_time).getTime();
+                                    
+                                    if (commentAge <= maxAge && 
+                                        !processedComments.has(comment.id) &&
+                                        comment.from.id !== realPageId &&
+                                        !(AUTO_REPLY_CONFIG.skipIfReplied && comment.comment_count > 0)) {
+                                        postEligible++;
+                                        eligibleComments++;
+                                    }
+                                }
+                                
+                                report += `   ✅ ${commentsResponse.data.data.length} commentaire(s)`;
+                                if (postEligible > 0) {
+                                    report += ` | 🎯 ${postEligible} éligible(s)`;
+                                }
+                                report += '\n';
+                                
+                                // Afficher quelques commentaires
+                                for (let j = 0; j < Math.min(3, commentsResponse.data.data.length); j++) {
+                                    const c = commentsResponse.data.data[j];
+                                    const cAge = Math.round((now - new Date(c.created_time).getTime()) / 3600000);
+                                    const status = c.comment_count > 0 ? '💬' : '⏳';
+                                    report += `      ${status} ${c.from.name}: "${c.message.substring(0, 25)}..." (${cAge}h)\n`;
+                                }
+                            } else {
+                                report += `   📭 Aucun commentaire\n`;
+                            }
+                            
+                        } catch (error) {
+                            if (error.response && error.response.status === 403) {
+                                report += `   🔒 Accès refusé (403)\n`;
+                            } else {
+                                report += `   ❌ Erreur: ${error.message}\n`;
+                            }
+                        }
+                        
+                        report += '\n';
+                        
+                        await new Promise(resolve => setTimeout(resolve, 500));
+                    }
+                    
+                    report += `📊 𝗥é𝘀𝘂𝗺é:\n`;
+                    report += `• Posts accessibles: ${accessibleCount}/${postsResponse.data.data.length}\n`;
+                    report += `• Posts avec commentaires: ${withCommentsCount}\n`;
+                    report += `• Commentaires totaux: ${totalComments}\n`;
+                    report += `• 🎯 Éligibles pour réponse: ${eligibleComments}\n\n`;
+                    
+                    if (eligibleComments === 0) {
+                        report += `💡 𝗣𝗼𝘂𝗿𝗾𝘂𝗼𝗶 0 éligible ?\n`;
+                        report += `• Tous déjà répondus (comment_count > 0)\n`;
+                        report += `• Ou plus vieux que ${AUTO_REPLY_CONFIG.maxCommentAge}h\n`;
+                        report += `• Ou déjà traités par le bot\n`;
+                        report += `• Ou commentaires de la page elle-même\n\n`;
+                        report += `🧪 Pour tester:\n`;
+                        report += `1. Commente ton post de test\n`;
+                        report += `2. Lance /autoreply scan\n`;
+                        report += `3. Lance /autoreply test`;
+                    }
+                    
+                    return report;
+                    
+                } catch (error) {
+                    log.error(`❌ Erreur scan: ${error.message}`);
+                    return `❌ Erreur scan: ${error.message}`;
+                }
             }
 
             case 'debug': {
@@ -737,6 +882,7 @@ Répond automatiquement aux commentaires non répondus sur la page Facebook.
 • /autoreply stop - Désactiver auto-reply
 • /autoreply status - Voir le statut
 • /autoreply config - Voir la config
+• /autoreply scan - Scanner tous les commentaires  
 • /autoreply test - Test manuel
 • /autoreply debug - Diagnostic complet
 
