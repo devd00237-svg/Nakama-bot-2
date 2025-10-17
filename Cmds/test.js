@@ -1,11 +1,12 @@
 /**
  * NakamaBot - Commande /chat UNIFIÉE avec Gemini + Mistral
- * + Détection commandes 100% IA (Gemini ET Mistral)
+ * + Détection commandes 100% IA (Gemini ET Mistral) avec seuil assoupli pour /image
  * + Recherche contextuelle gratuite multi-sources (DuckDuckGo, Wikipedia, Scraping)
  * + Support Markdown vers Unicode stylisé
  * + Optimisation: skip Gemini si toutes les clés sont mortes
- * + Exécution automatique des commandes détectées (chargement direct des modules comme dans l'ancienne version)
+ * + Exécution automatique des commandes détectées (chargement direct des modules)
  * + Protection anti-doublons, délai 5s, troncature synchronisée
+ * + Logs détaillés pour détection et exécution
  * @param {string} senderId - ID de l'utilisateur
  * @param {string} args - Message de conversation
  * @param {object} ctx - Contexte partagé du bot 
@@ -24,7 +25,7 @@ const fs = require('fs');
 const GEMINI_API_KEYS = process.env.GEMINI_API_KEY ? process.env.GEMINI_API_KEY.split(',').map(key => key.trim()) : [];
 const MISTRAL_API_KEY = process.env.MISTRAL_API_KEY || "";
 
-// 🆕 RECHERCHE GRATUITE (de la nouvelle version)
+// 🆕 RECHERCHE GRATUITE
 const SEARCH_CONFIG = {
     duckduckgo: {
         enabled: true,
@@ -48,7 +49,7 @@ const SEARCH_CONFIG = {
 const SEARCH_RETRY_DELAY = 2000;
 const SEARCH_GLOBAL_COOLDOWN = 3000;
 
-// État global (fusionné des deux versions)
+// État global
 let currentGeminiKeyIndex = 0;
 const failedKeys = new Set();
 const activeRequests = new Map();
@@ -65,7 +66,7 @@ let lastGeminiCheck = 0;
 const GEMINI_RECHECK_INTERVAL = 300000; // 5 minutes
 
 // ========================================
-// 🎨 FONCTIONS MARKDOWN → UNICODE (de l'ancienne version, optimisé)
+// 🎨 FONCTIONS MARKDOWN → UNICODE
 // ========================================
 
 const UNICODE_MAPPINGS = {
@@ -104,7 +105,7 @@ function parseMarkdown(text) {
 }
 
 // ========================================
-// 🔑 GESTION ROTATION CLÉS GEMINI (fusionné des deux versions)
+// 🔑 GESTION ROTATION CLÉS GEMINI
 // ========================================
 
 function checkIfAllGeminiKeysDead() {
@@ -233,7 +234,7 @@ async function callMistralUnified(prompt, ctx, maxTokens = 2000) {
 }
 
 // ========================================
-// 🆕 RECHERCHE GRATUITE - 3 MÉTHODES (de la nouvelle version)
+// 🆕 RECHERCHE GRATUITE - 3 MÉTHODES
 // ========================================
 
 async function searchDuckDuckGo(query, log) {
@@ -635,7 +636,7 @@ Réponds UNIQUEMENT avec ce JSON:
 }
 
 // ========================================
-// 🎯 DÉTECTION COMMANDES - GEMINI OU MISTRAL (de la nouvelle, avec fallback de l'ancienne)
+// 🎯 DÉTECTION COMMANDES - GEMINI OU MISTRAL (assoupli pour /image)
 // ========================================
 
 const VALID_COMMANDS = [
@@ -664,8 +665,8 @@ MESSAGE ACTUEL: "${message}"
 
 ⚠️ IMPORTANT: La commande /help est DÉJÀ intégrée dans le système, ne la détecte PAS.
 
-VRAIES INTENTIONS DE COMMANDES (confidence >= 0.85):
-✅ /image: Demande EXPLICITE de CRÉER/GÉNÉRER une image, dessin, illustration (ex: "dessine-moi un chat", "génère une image de...")
+VRAIES INTENTIONS DE COMMANDES (confidence >= 0.8):
+✅ /image: Toute demande de CRÉER/GÉNÉRER une image, même simple (ex: "cree une image de chat", "fais une image de maison en feu", "génère un dessin de...", "dessine un...")
 ✅ /vision: Demande EXPLICITE d'ANALYSER une image déjà envoyée (ex: "décris cette image", "que vois-tu sur la photo")
 ✅ /anime: Demande EXPLICITE de TRANSFORMER une image en style anime/manga (ex: "transforme en anime", "style manga")
 ✅ /music: Demande EXPLICITE de RECHERCHER/JOUER une musique sur YouTube (ex: "joue la chanson...", "cherche musique de...")
@@ -685,7 +686,7 @@ RÈGLES STRICTES:
 1. L'utilisateur DOIT vouloir UTILISER une fonctionnalité SPÉCIFIQUE du bot
 2. Il DOIT y avoir une DEMANDE D'ACTION CLAIRE et DIRECTE
 3. Tenir compte du CONTEXTE conversationnel
-4. Confidence MINIMUM 0.85 pour valider
+4. Confidence MINIMUM 0.8 pour valider (assoupli pour /image si clair)
 5. En cas de doute → NE PAS détecter de commande
 
 Réponds UNIQUEMENT avec ce JSON:
@@ -703,15 +704,15 @@ Réponds UNIQUEMENT avec ce JSON:
         if (!checkIfAllGeminiKeysDead()) {
             try {
                 response = await callGeminiWithRotation(detectionPrompt);
-                log.info(`💎 Détection commande via Gemini`);
+                log.info(`💎 Détection commande via Gemini pour "${message}"`);
             } catch (geminiError) {
                 log.warning(`⚠️ Gemini échec détection: ${geminiError.message}`);
                 response = await callMistralUnified(detectionPrompt, ctx, 500);
-                log.info(`🔄 Détection commande via Mistral`);
+                log.info(`🔄 Détection commande via Mistral pour "${message}"`);
             }
         } else {
             response = await callMistralUnified(detectionPrompt, ctx, 500);
-            log.info(`🔄 Détection commande via Mistral (Gemini désactivé)`);
+            log.info(`🔄 Détection commande via Mistral (Gemini désactivé) pour "${message}"`);
         }
         
         const jsonMatch = response.match(/\{[\s\S]*\}/);
@@ -719,12 +720,14 @@ Réponds UNIQUEMENT avec ce JSON:
         if (jsonMatch) {
             const aiDetection = JSON.parse(jsonMatch[0]);
             
+            log.debug(`🔍 Résultat détection IA: ${JSON.stringify(aiDetection)}`);
+            
             const isValid = aiDetection.isCommand && 
                           VALID_COMMANDS.includes(aiDetection.command) && 
-                          aiDetection.confidence >= 0.85;
+                          aiDetection.confidence >= 0.8;
             
             if (isValid) {
-                log.info(`🎯 Commande détectée: /${aiDetection.command} (${aiDetection.confidence})`);
+                log.info(`🎯 Commande détectée: /${aiDetection.command} (${aiDetection.confidence}) pour "${message}"`);
                 log.info(`📝 Raison: ${aiDetection.reason}`);
                 
                 return {
@@ -735,6 +738,7 @@ Réponds UNIQUEMENT avec ce JSON:
                     method: 'ai_contextual'
                 };
             } else {
+                log.debug(`🚫 Pas de commande détectée (confidence ${aiDetection.confidence}) pour "${message}"`);
                 return { shouldExecute: false };
             }
         }
@@ -742,32 +746,35 @@ Réponds UNIQUEMENT avec ce JSON:
         throw new Error('Format invalide');
         
     } catch (error) {
-        log.warning(`⚠️ Erreur détection IA commandes: ${error.message}`);
+        log.warning(`⚠️ Erreur détection IA commandes pour "${message}": ${error.message}`);
         
-        // Fallback strict par mots-clés (de l'ancienne version)
+        // Fallback strict par mots-clés
         return fallbackStrictKeywordDetection(message, log);
     }
 }
 
-// Fallback strict par mots-clés (de l'ancienne version)
+// Fallback strict par mots-clés (amélioré pour plus de variations)
 function fallbackStrictKeywordDetection(message, log) {
-    const lowerMessage = message.toLowerCase().trim();
+    const lowerMessage = message.toLowerCase().trim().normalize("NFD").replace(/[\u0300-\u036f]/g, ""); // Normaliser accents et fautes
     
     const strictPatterns = [
-        { command: 'image', patterns: [/^dessine(-moi)?\s+/, /^(crée|génère|fais)\s+(une\s+)?(image|dessin|illustration)/, /^(illustre|artwork)/] },
-        { command: 'vision', patterns: [/^regarde\s+(cette\s+)?(image|photo)/, /^(analyse|décris|examine)\s+(cette\s+)?(image|photo)/, /^que vois-tu/] },
+        { command: 'image', patterns: [
+            /^cree\s+(une\s+)?image/, /^cree\s+(une\s+)?dessin/, /^fais\s+(une\s+)?image/, /^genere\s+(une\s+)?image/, 
+            /^dessine\s+/, /^illustre\s+/, /^cree\s+(un\s+)?chat/, /^fais\s+(un\s+)?chat/ // Ajout variations fautes
+        ] },
+        { command: 'vision', patterns: [/^regarde\s+(cette\s+)?(image|photo)/, /^(analyse|decrit|examine)\s+(cette\s+)?(image|photo)/, /^que vois-tu/] },
         { command: 'anime', patterns: [/^transforme en anime/, /^style (anime|manga)/, /^version manga/, /^art anime/] },
         { command: 'music', patterns: [/^(joue|lance|play)\s+/, /^(trouve|cherche)\s+(sur\s+youtube\s+)?cette\s+(musique|chanson)/, /^(cherche|trouve)\s+la\s+(musique|chanson)\s+/] },
-        { command: 'clan', patterns: [/^(rejoindre|créer|mon)\s+clan/, /^bataille\s+de\s+clan/, /^(défier|guerre)\s+/] },
+        { command: 'clan', patterns: [/^(rejoindre|creer|mon)\s+clan/, /^bataille\s+de\s+clan/, /^(defier|guerre)\s+/] },
         { command: 'rank', patterns: [/^(mon\s+)?(niveau|rang|stats|progression)/, /^mes\s+(stats|points)/] },
-        { command: 'contact', patterns: [/^contacter\s+(admin|administrateur)/, /^signaler\s+problème/, /^support\s+technique/] },
-        { command: 'weather', patterns: [/^(météo|quel\s+temps|température|prévisions)/, /^temps\s+qu.il\s+fait/] }
+        { command: 'contact', patterns: [/^contacter\s+(admin|administrateur)/, /^signaler\s+probleme/, /^support\s+technique/] },
+        { command: 'weather', patterns: [/^(meteo|quel\s+temps|temperature|previsions)/, /^temps\s+qu.il\s+fait/] }
     ];
     
     for (const { command, patterns } of strictPatterns) {
         for (const pattern of patterns) {
             if (pattern.test(lowerMessage)) {
-                log.info(`🔑 Fallback keyword strict: /${command} détecté`);
+                log.info(`🔑 Fallback keyword strict: /${command} détecté pour "${message}"`);
                 return {
                     shouldExecute: true,
                     command,
@@ -779,11 +786,12 @@ function fallbackStrictKeywordDetection(message, log) {
         }
     }
     
+    log.debug(`🚫 Pas de commande fallback pour "${message}"`);
     return { shouldExecute: false };
 }
 
 // ========================================
-// 📝 GÉNÉRATION RÉPONSE NATURELLE AVEC CONTEXTE (de l'ancienne, adaptée)
+// 📝 GÉNÉRATION RÉPONSE NATURELLE AVEC CONTEXTE
 // ========================================
 
 async function generateNaturalResponseWithContext(originalQuery, searchResults, conversationHistory, ctx) {
@@ -864,7 +872,7 @@ Réponds naturellement (max 2000 chars):`
 }
 
 // ========================================
-// 💬 CONVERSATION UNIFIÉE - GEMINI OU MISTRAL (fusionné avec troncature de l'ancienne)
+// 💬 CONVERSATION UNIFIÉE - GEMINI OU MISTRAL
 // ========================================
 
 async function handleConversationWithFallback(senderId, args, ctx, searchResults = null) {
@@ -1056,7 +1064,7 @@ function generateContactSuggestion(reason, extractedMessage) {
 }
 
 // ========================================
-// ⚙️ EXÉCUTION COMMANDE (de l'ancienne version, intégrée pour autonomie)
+// ⚙️ EXÉCUTION COMMANDE
 // ========================================
 
 async function executeCommandFromChat(senderId, commandName, args, ctx) {
@@ -1136,7 +1144,7 @@ Réponds naturellement et amicalement pour présenter ce résultat (max 400 char
 }
 
 // ========================================
-// 🛡️ FONCTION PRINCIPALE (fusionnée avec protections et exécution automatique)
+// 🛡️ FONCTION PRINCIPALE
 // ========================================
 
 module.exports = async function cmdChat(senderId, args, ctx) {
@@ -1294,7 +1302,7 @@ module.exports = async function cmdChat(senderId, args, ctx) {
 };
 
 // ========================================
-// 📤 EXPORTS (fusionnés)
+// 📤 EXPORTS
 // ========================================
 
 module.exports.detectIntelligentCommands = detectIntelligentCommands;
