@@ -8,7 +8,7 @@ const axios = require("axios");
 
 // Configuration AI Horde
 const AI_HORDE_API_URL = "https://stablehorde.net/api/v2";
-const AI_HORDE_API_KEY = process.env.AI_HORDE_API_KEY || "0000000000"; // Clé anonyme par défaut
+const AI_HORDE_API_KEY = process.env.AI_HORDE_API_KEY || "MyCjl90bq7fwEaxobqSPHg"; // Clé anonyme par défaut
 
 // ✅ Protection anti-spam - Limite de requêtes par utilisateur
 const userGenerationLocks = new Map();
