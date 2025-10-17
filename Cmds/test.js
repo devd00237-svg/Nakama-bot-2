@@ -7,6 +7,7 @@
  * + Exécution automatique des commandes détectées (chargement direct des modules)
  * + Protection anti-doublons, délai 5s, troncature synchronisée
  * + Logs détaillés pour détection et exécution
+ * + Fix: Strip slash from command name in AI detection
  * @param {string} senderId - ID de l'utilisateur
  * @param {string} args - Message de conversation
  * @param {object} ctx - Contexte partagé du bot 
@@ -704,15 +705,15 @@ Réponds UNIQUEMENT avec ce JSON:
         if (!checkIfAllGeminiKeysDead()) {
             try {
                 response = await callGeminiWithRotation(detectionPrompt);
-                log.info(`💎 Détection commande via Gemini pour "${message}"`);
+                log.info(`💎 Détection commande via Gemini pour "${message.substring(0, 50)}..."`);
             } catch (geminiError) {
                 log.warning(`⚠️ Gemini échec détection: ${geminiError.message}`);
                 response = await callMistralUnified(detectionPrompt, ctx, 500);
-                log.info(`🔄 Détection commande via Mistral pour "${message}"`);
+                log.info(`🔄 Détection commande via Mistral pour "${message.substring(0, 50)}..."`);
             }
         } else {
             response = await callMistralUnified(detectionPrompt, ctx, 500);
-            log.info(`🔄 Détection commande via Mistral (Gemini désactivé) pour "${message}"`);
+            log.info(`🔄 Détection commande via Mistral (Gemini désactivé) pour "${message.substring(0, 50)}..."`);
         }
         
         const jsonMatch = response.match(/\{[\s\S]*\}/);
@@ -720,14 +721,19 @@ Réponds UNIQUEMENT avec ce JSON:
         if (jsonMatch) {
             const aiDetection = JSON.parse(jsonMatch[0]);
             
-            log.debug(`🔍 Résultat détection IA: ${JSON.stringify(aiDetection)}`);
+            // 🆕 FIX: Retirer le slash du nom de commande si présent
+            if (aiDetection.command) {
+                aiDetection.command = aiDetection.command.replace('/', '');
+            }
+            
+            log.debug(`🔍 Résultat détection IA (après fix slash): ${JSON.stringify(aiDetection)}`);
             
             const isValid = aiDetection.isCommand && 
                           VALID_COMMANDS.includes(aiDetection.command) && 
                           aiDetection.confidence >= 0.8;
             
             if (isValid) {
-                log.info(`🎯 Commande détectée: /${aiDetection.command} (${aiDetection.confidence}) pour "${message}"`);
+                log.info(`🎯 Commande détectée: /${aiDetection.command} (${aiDetection.confidence})`);
                 log.info(`📝 Raison: ${aiDetection.reason}`);
                 
                 return {
@@ -738,7 +744,7 @@ Réponds UNIQUEMENT avec ce JSON:
                     method: 'ai_contextual'
                 };
             } else {
-                log.debug(`🚫 Pas de commande détectée (confidence ${aiDetection.confidence}) pour "${message}"`);
+                log.debug(`🚫 Pas de commande détectée (confidence ${aiDetection.confidence}, command: ${aiDetection.command}, isCommand: ${aiDetection.isCommand})`);
                 return { shouldExecute: false };
             }
         }
@@ -746,7 +752,7 @@ Réponds UNIQUEMENT avec ce JSON:
         throw new Error('Format invalide');
         
     } catch (error) {
-        log.warning(`⚠️ Erreur détection IA commandes pour "${message}": ${error.message}`);
+        log.warning(`⚠️ Erreur détection IA commandes pour "${message.substring(0, 50)}...": ${error.message}`);
         
         // Fallback strict par mots-clés
         return fallbackStrictKeywordDetection(message, log);
@@ -774,7 +780,7 @@ function fallbackStrictKeywordDetection(message, log) {
     for (const { command, patterns } of strictPatterns) {
         for (const pattern of patterns) {
             if (pattern.test(lowerMessage)) {
-                log.info(`🔑 Fallback keyword strict: /${command} détecté pour "${message}"`);
+                log.info(`🔑 Fallback keyword strict: /${command} détecté pour "${message.substring(0, 50)}..."`);
                 return {
                     shouldExecute: true,
                     command,
@@ -786,7 +792,7 @@ function fallbackStrictKeywordDetection(message, log) {
         }
     }
     
-    log.debug(`🚫 Pas de commande fallback pour "${message}"`);
+    log.debug(`🚫 Pas de commande fallback pour "${message.substring(0, 50)}..."`);
     return { shouldExecute: false };
 }
 
