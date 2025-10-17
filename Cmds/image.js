@@ -199,6 +199,11 @@ module.exports = async function cmdImage(senderId, args, ctx) {
     }
 };
 
+// ✅ Helper pour attendre (sleep)
+function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
 // ✅ Génération avec AI Horde (Stable Horde)
 async function generateWithAIHorde(prompt, log) {
     try {
@@ -248,7 +253,7 @@ async function generateWithAIHorde(prompt, log) {
         const maxAttempts = 60; // Max 2 minutes d'attente (2 secondes x 60)
         
         while (attempts < maxAttempts) {
-            await new Promise(resolve => setTimeout(resolve, 2000)); // Attendre 2 secondes
+            await sleep(2000); // Attendre 2 secondes
             
             const checkResponse = await axios.get(
                 `${AI_HORDE_API_URL}/generate/check/${requestId}`,
