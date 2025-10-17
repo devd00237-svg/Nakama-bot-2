@@ -1,14 +1,16 @@
 /**
- * Commande /image - Génération d'images IA avec AI Horde (Pollinations en fallback)
+ * Commande /image - Génération d'images IA (DALL-E en priorité, AI Horde puis Pollinations en fallback)
  * @param {string} senderId - ID de l'utilisateur
  * @param {string} args - Description de l'image à générer
  * @param {object} ctx - Contexte partagé du bot
  */
 const axios = require("axios");
+const { OpenAI } = require("openai");
 
-// Configuration AI Horde
+// Configuration API
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const AI_HORDE_API_URL = "https://stablehorde.net/api/v2";
-const AI_HORDE_API_KEY = process.env.AI_HORDE_API_KEY || "MyCjl90bq7fwEaxobqSPHg"; // Clé anonyme par défaut
+const AI_HORDE_API_KEY = process.env.AI_HORDE_API_KEY || "0000000000"; // Clé anonyme par défaut
 
 // ✅ Protection anti-spam - Limite de requêtes par utilisateur
 const userGenerationLocks = new Map();
@@ -99,7 +101,37 @@ module.exports = async function cmdImage(senderId, args, ctx) {
     const optimizedPrompt = optimizePromptForImageGeneration(prompt);
     
     try {
-        // ✅ PRIORITÉ: Essayer d'abord avec AI Horde
+        // ✅ PRIORITÉ 1: Essayer d'abord avec DALL-E si clé disponible
+        if (OPENAI_API_KEY) {
+            log.info(`🎨 Tentative génération DALL-E pour ${senderId}: ${prompt}`);
+            
+            const dalleResult = await generateWithDalle(optimizedPrompt, log);
+            
+            if (dalleResult && dalleResult.success) {
+                // Sauvegarder dans la mémoire
+                addToMemory(senderIdStr, 'user', `Image demandée: ${prompt}`);
+                addToMemory(senderIdStr, 'assistant', `Image créée: ${prompt}`);
+                
+                // ✅ PROTECTION 3: Libérer le lock après succès
+                userGenerationLocks.set(senderIdStr, {
+                    generating: false,
+                    lastGenTime: Date.now()
+                });
+                
+                log.info(`💎 Image DALL-E créée avec succès pour ${senderId}`);
+                
+                return {
+                    type: "image",
+                    url: dalleResult.imageUrl,
+                    caption: `🎨 Image créée avec succès ! ✨
+📝 "${prompt}"`
+                };
+            }
+        } else {
+            log.warning(`⚠️ Pas de clé OpenAI, skip DALL-E`);
+        }
+        
+        // ✅ PRIORITÉ 2: AI Horde
         log.info(`🎨 Tentative génération AI Horde pour ${senderId}: ${prompt}`);
         
         const hordeResult = await generateWithAIHorde(optimizedPrompt, log);
@@ -131,7 +163,7 @@ module.exports = async function cmdImage(senderId, args, ctx) {
         log.warning(`⚠️ AI Horde échec pour ${senderId}: ${hordeError.message}`);
         
         try {
-            // ✅ FALLBACK: Utiliser Pollinations si AI Horde échoue
+            // ✅ FALLBACK: Utiliser Pollinations si les autres échouent
             log.info(`🔄 Fallback Pollinations pour ${senderId}`);
             
             const pollinationsResult = await generateWithPollinations(optimizedPrompt, getRandomInt);
@@ -160,7 +192,7 @@ module.exports = async function cmdImage(senderId, args, ctx) {
             throw new Error('Pollinations generation also failed');
             
         } catch (pollinationsError) {
-            log.error(`❌ Erreur totale génération image ${senderId}: AI Horde(${hordeError.message}) + Pollinations(${pollinationsError.message})`);
+            log.error(`❌ Erreur totale génération image ${senderId}: DALL-E/AI Horde(${hordeError.message}) + Pollinations(${pollinationsError.message})`);
             
             // ✅ PROTECTION 5: Libérer le lock même en cas d'échec total
             userGenerationLocks.set(senderIdStr, {
@@ -177,6 +209,34 @@ module.exports = async function cmdImage(senderId, args, ctx) {
 // ✅ Helper pour attendre (sleep)
 function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+// ✅ Génération avec DALL-E (priorité si clé disponible)
+async function generateWithDalle(prompt, log) {
+    try {
+        const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
+        
+        const response = await openai.images.generate({
+            model: "dall-e-3",
+            prompt: prompt,
+            n: 1,
+            size: "1024x1024",
+            quality: "standard"
+        });
+        
+        const imageUrl = response.data[0].url;
+        
+        if (!imageUrl) throw new Error('No image URL returned');
+        
+        return {
+            success: true,
+            imageUrl: imageUrl
+        };
+        
+    } catch (error) {
+        log.error(`❌ Erreur DALL-E: ${error.message}`);
+        return { success: false, error: error.message };
+    }
 }
 
 // ✅ Génération avec AI Horde (Stable Horde)
