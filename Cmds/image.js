@@ -126,7 +126,7 @@ async function generateWithAIHorde(prompt, log) {
             method: "POST",
             headers: { 
                 "Content-Type": "application/json",
-                "apikey": "0000000000"  // Clé anonyme pour accès basique
+                "apikey": "MyCjl90bq7fwEaxobqSPHg"  // Clé anonyme pour accès basique
             },
             body: JSON.stringify(payload)
         });
