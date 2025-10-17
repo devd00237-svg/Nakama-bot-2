@@ -1,16 +1,9 @@
 /**
- * Commande /image - Génération d'images IA (DALL-E en priorité, AI Horde puis Pollinations en fallback)
+ * Commande /image - Génération d'images IA avec Pollinations
  * @param {string} senderId - ID de l'utilisateur
  * @param {string} args - Description de l'image à générer
  * @param {object} ctx - Contexte partagé du bot
  */
-const axios = require("axios");
-const { OpenAI } = require("openai");
-
-// Configuration API
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const AI_HORDE_API_URL = "https://stablehorde.net/api/v2";
-const AI_HORDE_API_KEY = process.env.AI_HORDE_API_KEY || "0000000000"; // Clé anonyme par défaut
 
 // ✅ Protection anti-spam - Limite de requêtes par utilisateur
 const userGenerationLocks = new Map();
@@ -101,42 +94,12 @@ module.exports = async function cmdImage(senderId, args, ctx) {
     const optimizedPrompt = optimizePromptForImageGeneration(prompt);
     
     try {
-        // ✅ PRIORITÉ 1: Essayer d'abord avec DALL-E si clé disponible
-        if (OPENAI_API_KEY) {
-            log.info(`🎨 Tentative génération DALL-E pour ${senderId}: ${prompt}`);
-            
-            const dalleResult = await generateWithDalle(optimizedPrompt, log);
-            
-            if (dalleResult && dalleResult.success) {
-                // Sauvegarder dans la mémoire
-                addToMemory(senderIdStr, 'user', `Image demandée: ${prompt}`);
-                addToMemory(senderIdStr, 'assistant', `Image créée: ${prompt}`);
-                
-                // ✅ PROTECTION 3: Libérer le lock après succès
-                userGenerationLocks.set(senderIdStr, {
-                    generating: false,
-                    lastGenTime: Date.now()
-                });
-                
-                log.info(`💎 Image DALL-E créée avec succès pour ${senderId}`);
-                
-                return {
-                    type: "image",
-                    url: dalleResult.imageUrl,
-                    caption: `🎨 Image créée avec succès ! ✨
-📝 "${prompt}"`
-                };
-            }
-        } else {
-            log.warning(`⚠️ Pas de clé OpenAI, skip DALL-E`);
-        }
+        // ✅ Création de l'image avec Pollinations
+        log.info(`🎨 Création de l'image pour ${senderId}: ${prompt}`);
         
-        // ✅ PRIORITÉ 2: AI Horde
-        log.info(`🎨 Tentative génération AI Horde pour ${senderId}: ${prompt}`);
+        const pollinationsResult = await generateWithPollinations(optimizedPrompt, getRandomInt);
         
-        const hordeResult = await generateWithAIHorde(optimizedPrompt, log);
-        
-        if (hordeResult && hordeResult.success) {
+        if (pollinationsResult && pollinationsResult.success) {
             // Sauvegarder dans la mémoire
             addToMemory(senderIdStr, 'user', `Image demandée: ${prompt}`);
             addToMemory(senderIdStr, 'assistant', `Image créée: ${prompt}`);
@@ -147,208 +110,33 @@ module.exports = async function cmdImage(senderId, args, ctx) {
                 lastGenTime: Date.now()
             });
             
-            log.info(`💎 Image AI Horde créée avec succès pour ${senderId}`);
+            log.info(`🌸 Image créée avec succès pour ${senderId}`);
             
             return {
                 type: "image",
-                url: hordeResult.imageUrl,
+                url: pollinationsResult.imageUrl,
                 caption: `🎨 Image créée avec succès ! ✨
 📝 "${prompt}"`
             };
         }
         
-        throw new Error('AI Horde generation failed');
+        throw new Error('Pollinations generation failed');
         
-    } catch (hordeError) {
-        log.warning(`⚠️ AI Horde échec pour ${senderId}: ${hordeError.message}`);
+    } catch (pollinationsError) {
+        log.error(`❌ Erreur génération image ${senderId}: ${pollinationsError.message}`);
         
-        try {
-            // ✅ FALLBACK: Utiliser Pollinations si les autres échouent
-            log.info(`🔄 Fallback Pollinations pour ${senderId}`);
-            
-            const pollinationsResult = await generateWithPollinations(optimizedPrompt, getRandomInt);
-            
-            if (pollinationsResult && pollinationsResult.success) {
-                // Sauvegarder dans la mémoire
-                addToMemory(senderIdStr, 'user', `Image demandée: ${prompt}`);
-                addToMemory(senderIdStr, 'assistant', `Image créée: ${prompt}`);
-                
-                // ✅ PROTECTION 4: Libérer le lock après succès fallback
-                userGenerationLocks.set(senderIdStr, {
-                    generating: false,
-                    lastGenTime: Date.now()
-                });
-                
-                log.info(`🌸 Image Pollinations créée avec succès pour ${senderId}`);
-                
-                return {
-                    type: "image",
-                    url: pollinationsResult.imageUrl,
-                    caption: `🎨 Image créée avec succès ! ✨
-📝 "${prompt}"`
-                };
-            }
-            
-            throw new Error('Pollinations generation also failed');
-            
-        } catch (pollinationsError) {
-            log.error(`❌ Erreur totale génération image ${senderId}: DALL-E/AI Horde(${hordeError.message}) + Pollinations(${pollinationsError.message})`);
-            
-            // ✅ PROTECTION 5: Libérer le lock même en cas d'échec total
-            userGenerationLocks.set(senderIdStr, {
-                generating: false,
-                lastGenTime: Date.now()
-            });
-            
-            return `😢 Oups ! Problème pour créer l'image ! 
+        // ✅ PROTECTION 4: Libérer le lock même en cas d'échec
+        userGenerationLocks.set(senderIdStr, {
+            generating: false,
+            lastGenTime: Date.now()
+        });
+        
+        return `😢 Oups ! Problème pour créer l'image ! 
 ⏰ Réessaie bientôt ! 💖`;
-        }
     }
 };
 
-// ✅ Helper pour attendre (sleep)
-function sleep(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-// ✅ Génération avec DALL-E (priorité si clé disponible)
-async function generateWithDalle(prompt, log) {
-    try {
-        const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
-        
-        const response = await openai.images.generate({
-            model: "dall-e-3",
-            prompt: prompt,
-            n: 1,
-            size: "1024x1024",
-            quality: "standard"
-        });
-        
-        const imageUrl = response.data[0].url;
-        
-        if (!imageUrl) throw new Error('No image URL returned');
-        
-        return {
-            success: true,
-            imageUrl: imageUrl
-        };
-        
-    } catch (error) {
-        log.error(`❌ Erreur DALL-E: ${error.message}`);
-        return { success: false, error: error.message };
-    }
-}
-
-// ✅ Génération avec AI Horde (Stable Horde)
-async function generateWithAIHorde(prompt, log) {
-    try {
-        const startTime = Date.now();
-        
-        // Étape 1: Créer une requête de génération
-        const generatePayload = {
-            prompt: prompt,
-            params: {
-                n: 1, // Nombre d'images
-                width: 512, // Largeur (512, 768, 1024)
-                height: 512, // Hauteur
-                steps: 30, // Nombre d'étapes (20-50 recommandé)
-                cfg_scale: 7.5, // Guidance scale (7-12 recommandé)
-                sampler_name: "k_euler_a", // Sampler (k_euler_a, k_dpmpp_2m, etc.)
-                seed: Math.floor(Math.random() * 4294967295).toString(),
-                karras: true,
-                denoising_strength: 0.75,
-                post_processing: ["RealESRGAN_x4plus"] // Upscaling optionnel
-            },
-            nsfw: false, // Pas de contenu NSFW
-            censor_nsfw: true,
-            models: ["Deliberate", "Dreamshaper", "stable_diffusion"] // Modèles préférés
-        };
-        
-        // Envoyer la requête
-        log.info(`📤 Envoi requête AI Horde...`);
-        const generateResponse = await axios.post(
-            `${AI_HORDE_API_URL}/generate/async`,
-            generatePayload,
-            {
-                headers: {
-                    'Content-Type': 'application/json',
-                    'apikey': AI_HORDE_API_KEY
-                },
-                timeout: 10000 // 10 secondes timeout pour l'envoi
-            }
-        );
-        
-        const requestId = generateResponse.data.id;
-        log.info(`✅ Requête créée avec ID: ${requestId}`);
-        
-        // Étape 2: Polling pour vérifier le statut
-        let attempts = 0;
-        const maxAttempts = 60; // Max 2 minutes d'attente (2 secondes x 60)
-        
-        while (attempts < maxAttempts) {
-            await sleep(2000); // Attendre 2 secondes
-            
-            const checkResponse = await axios.get(
-                `${AI_HORDE_API_URL}/generate/check/${requestId}`,
-                {
-                    headers: { 'apikey': AI_HORDE_API_KEY },
-                    timeout: 5000
-                }
-            );
-            
-            const status = checkResponse.data;
-            log.info(`⏳ Statut AI Horde: ${status.done ? 'Terminé' : `En attente (${status.wait_time}s restant)`}`);
-            
-            // Si la génération est terminée
-            if (status.done) {
-                // Récupérer l'image
-                const statusResponse = await axios.get(
-                    `${AI_HORDE_API_URL}/generate/status/${requestId}`,
-                    {
-                        headers: { 'apikey': AI_HORDE_API_KEY },
-                        timeout: 5000
-                    }
-                );
-                
-                const generations = statusResponse.data.generations;
-                
-                if (generations && generations.length > 0) {
-                    const generation = generations[0];
-                    const waitTime = Math.round((Date.now() - startTime) / 1000);
-                    
-                    log.info(`✅ Image AI Horde générée en ${waitTime}s`);
-                    
-                    return {
-                        success: true,
-                        imageUrl: generation.img
-                    };
-                }
-            }
-            
-            // Si la requête a été mise en file d'attente
-            if (status.waiting > 0 || status.processing > 0) {
-                log.info(`⏳ File d'attente: ${status.queue_position || 0} positions, ${status.wait_time || 0}s estimés`);
-            }
-            
-            attempts++;
-        }
-        
-        // Timeout après le nombre max de tentatives
-        throw new Error('Timeout: Image generation took too long');
-        
-    } catch (error) {
-        log.error(`❌ Erreur AI Horde: ${error.message}`);
-        
-        if (error.response) {
-            log.error(`   Status: ${error.response.status}`);
-            log.error(`   Data: ${JSON.stringify(error.response.data)}`);
-        }
-        
-        return { success: false, error: error.message };
-    }
-}
-
-// ✅ Génération avec Pollinations (fallback)
+// ✅ Génération avec Pollinations
 async function generateWithPollinations(prompt, getRandomInt) {
     try {
         // Encoder le prompt pour l'URL
