@@ -1158,11 +1158,9 @@ const commandContext = {
     saveDataToGitHub,
     saveDataImmediate,
     loadDataFromGitHub,
-    createGitHubRepo,
-    
-    // 🔥 CRITIQUE: Ajouter processCommand pour que chat.js puisse l'appeler
-    processCommand: null // Sera initialisé après la déclaration de la fonction
+    createGitHubRepo
 };
+
 // ✅ FONCTION loadCommands MODIFIÉE pour capturer la commande rank
 function loadCommands() {
     const commandsDir = path.join(__dirname, 'Cmds');
@@ -1283,7 +1281,6 @@ async function processCommand(senderId, messageText) {
     
     if (COMMANDS.has(command)) {
         try {
-            log.info(`🎯 Exécution commande /${command} par ${senderId}`);
             return await COMMANDS.get(command)(senderId, args, commandContext);
         } catch (error) {
             log.error(`❌ Erreur commande ${command}: ${error.message}`);
@@ -1294,7 +1291,6 @@ async function processCommand(senderId, messageText) {
     return `❓ Oh ! La commande /${command} m'est inconnue ! Tape /help pour voir tout ce que je sais faire ! ✨💕`;
 }
 
-commandContext.processCommand = processCommand;
 // === ROUTES EXPRESS ===
 
 // === ROUTE D'ACCUEIL MISE À JOUR ===
@@ -1409,7 +1405,7 @@ app.post('/webhook', async (req, res) => {
                                     
                                     saveDataImmediate();
                                     
-                                    const response = "✅";
+                                    const response = "📸 Super ! J'ai bien reçu ton image ! ✨\n\n🎭 Tape /anime pour la transformer en style anime !\n👁️ Tape /vision pour que je te dise ce que je vois !\n\n💕 Ou continue à me parler normalement !";
                                     
                                     const sendResult = await sendMessage(senderId, response);
                                     if (sendResult.success) {
