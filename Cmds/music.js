@@ -10,10 +10,7 @@ module.exports = async function cmdMusic(senderId, args, ctx) {
     const { addToMemory, log } = ctx;
 
     if (!args.trim()) {
-        return `🎵 Tape /music suivi du titre pour recevoir un lien YouTube :
-Exemples :
-/music blinding light
-/music eminem lose yourself`;
+        return `🎵 /music [titre] - Ex: /music blinding light`;
     }
 
     const query = args.trim();
@@ -23,7 +20,7 @@ Exemples :
         const results = await Youtube.GetListByKeyword(query, false, 1);
 
         if (!results.items || results.items.length === 0) {
-            return `😢 Désolé, aucune vidéo trouvée pour "${query}". Essaie un autre titre.`;
+            return `😢 Aucune vidéo pour "${query}".`;
         }
 
         const video = results.items[0];
@@ -31,14 +28,11 @@ Exemples :
 
         // Enregistrer dans la mémoire
         addToMemory(String(senderId), 'user', `/music ${query}`);
-        addToMemory(String(senderId), 'bot', `Lien YouTube envoyé : ${videoUrl}`);
+        addToMemory(String(senderId), 'assistant', `Lien: ${videoUrl}`);
 
-        return `🎶 Voici le lien YouTube pour "${query}" :
-${videoUrl}
-
-ℹ️ Tu peux écouter la musique directement ici.`;
+        return `🎶 Voici le lien : ${videoUrl}`;
     } catch (error) {
         log.error(`Erreur /music: ${error.message}`);
-        return `⚠️ Oups, une erreur est survenue pendant la recherche. Essaie plus tard.`;
+        return `⚠️ Erreur recherche. Réessaie.`;
     }
 };
