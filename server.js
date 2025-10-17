@@ -1405,7 +1405,7 @@ app.post('/webhook', async (req, res) => {
                                     
                                     saveDataImmediate();
                                     
-                                    const response = "📸 Super ! J'ai bien reçu ton image ! ✨\n\n🎭 Tape /anime pour la transformer en style anime !\n👁️ Tape /vision pour que je te dise ce que je vois !\n\n💕 Ou continue à me parler normalement !";
+                                    const response = "✅";
                                     
                                     const sendResult = await sendMessage(senderId, response);
                                     if (sendResult.success) {
