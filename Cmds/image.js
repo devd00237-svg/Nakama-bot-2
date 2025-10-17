@@ -1,5 +1,5 @@
 /**
- * Commande /image - Génération d'images IA (AI Horde en priorité, Pollinations en secours)
+ * Commande /image - Génération d'images IA (AI Horde en priorité avec clé anonyme, Pollinations en secours)
  * @param {string} senderId - ID de l'utilisateur
  * @param {string} args - Description de l'image à générer
  * @param {object} ctx - Contexte partagé du bot
@@ -43,11 +43,11 @@ module.exports = async function cmdImage(senderId, args, ctx) {
     if (prompt.length < 3) return "❌ Ta description est trop courte ! 💕";
     if (prompt.length > 200) return "❌ Ta description est trop longue ! (max 200 caractères) 🌸";
 
-    // Optimisation du prompt
+    // Optimisation du prompt (sans traduction)
     const optimizedPrompt = optimizePromptForImage(prompt);
 
     try {
-        // ⚡ Tentative 1 : AI Horde
+        // ⚡ Tentative 1 : AI Horde avec clé anonyme
         log.info(`🎨 Tentative AI Horde pour ${senderId}: ${optimizedPrompt}`);
         const hordeResult = await generateWithAIHorde(optimizedPrompt, log);
 
@@ -102,7 +102,7 @@ module.exports = async function cmdImage(senderId, args, ctx) {
 
 /* === Fonctions d’intégration === */
 
-// ⚙️ Génération via AI Horde
+// ⚙️ Génération via AI Horde (avec clé anonyme pour priorité basse)
 async function generateWithAIHorde(prompt, log) {
     try {
         const payload = {
@@ -118,72 +118,72 @@ async function generateWithAIHorde(prompt, log) {
             nsfw: false,
             censor_nsfw: true,
             trusted_workers: true,
-            models: ["stable_diffusion"],
+            models: ["stable_diffusion_2.1"],  // Modèle mis à jour pour meilleure qualité
             r2: true
         };
 
         const res = await fetch("https://aihorde.net/api/v2/generate/async", {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers: { 
+                "Content-Type": "application/json",
+                "apikey": "0000000000"  // Clé anonyme pour accès basique
+            },
             body: JSON.stringify(payload)
         });
+
+        if (!res.ok) {
+            throw new Error(`AI Horde API error: ${res.status} - ${await res.text()}`);
+        }
 
         const data = await res.json();
         if (!data.id) throw new Error("No job ID returned");
 
-        // Attente du résultat
+        // Attente du résultat avec timeout étendu
         let imageUrl = null;
-        for (let i = 0; i < 30; i++) {
-            const status = await fetch(`https://aihorde.net/api/v2/generate/status/${data.id}`);
-            const json = await status.json();
+        const maxAttempts = 60;  // Augmenté pour gérer files d'attente plus longues
+        for (let i = 0; i < maxAttempts; i++) {
+            const statusRes = await fetch(`https://aihorde.net/api/v2/generate/status/${data.id}`);
+            if (!statusRes.ok) {
+                throw new Error(`Status check error: ${statusRes.status}`);
+            }
+            const json = await statusRes.json();
             if (json.done && json.generations?.length > 0) {
                 imageUrl = json.generations[0].img;
                 break;
             }
-            await new Promise(r => setTimeout(r, 2000)); // pause 2 s
+            await new Promise(r => setTimeout(r, 3000));  // Pause 3s pour éviter rate limits
         }
 
-        if (!imageUrl) throw new Error("AI Horde timeout");
+        if (!imageUrl) throw new Error("AI Horde timeout after extended wait");
         log.info("✅ Image AI Horde générée avec succès");
         return { success: true, imageUrl, id: data.id };
     } catch (err) {
+        log.error(`❌ AI Horde error: ${err.message}`);
         return { success: false, error: err.message };
     }
 }
 
-// 🎨 Génération via Pollinations
+// 🎨 Génération via Pollinations (paramètres optimisés pour Flux)
 async function generateWithPollinations(prompt, getRandomInt) {
     try {
         const encodedPrompt = encodeURIComponent(prompt);
         const seed = getRandomInt(100000, 999999);
         const imageUrl = `https://image.pollinations.ai/prompt/${encodedPrompt}?width=768&height=768&seed=${seed}&enhance=true&nologo=true&model=flux`;
+        // Vérifier si l'URL est accessible (optionnel, mais pour robustesse)
+        const res = await fetch(imageUrl, { method: 'HEAD' });
+        if (!res.ok) throw new Error(`Pollinations URL invalid: ${res.status}`);
         return { success: true, imageUrl, seed };
     } catch (error) {
+        log.error(`❌ Pollinations error: ${error.message}`);
         return { success: false, error: error.message };
     }
 }
 
-// 🧠 Optimisation du prompt
+// 🧠 Optimisation du prompt (sans traduction)
 function optimizePromptForImage(prompt) {
     let optimized = prompt.trim();
     if (!/high quality|detailed|beautiful/i.test(optimized)) {
-        optimized += ", high quality, detailed, realistic lighting";
+        optimized += ", high quality, detailed, realistic lighting, vibrant colors, sharp focus";
     }
-
-    const translations = {
-        'chat': 'cat',
-        'chien': 'dog',
-        'paysage': 'landscape',
-        'fleur': 'flower',
-        'femme': 'woman',
-        'homme': 'man',
-        'voiture': 'car',
-        'arbre': 'tree',
-        'maison': 'house'
-    };
-    for (const [fr, en] of Object.entries(translations)) {
-        optimized = optimized.replace(new RegExp(`\\b${fr}\\b`, 'gi'), en);
-    }
-
     return optimized;
 }
