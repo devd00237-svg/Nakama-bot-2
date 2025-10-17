@@ -1,23 +1,30 @@
 /**
- * NakamaBot - Commande /chat avec MÉMOIRE CONTEXTUELLE et recherche GRATUITE
- * VERSION 100% MISTRAL - Sans dépendance Gemini
- * + Détection commandes 100% IA (pas de mots-clés)
- * + Recherche contextuelle basée sur l'historique de conversation
- * + Support Markdown vers Unicode stylisé pour Facebook Messenger
- * + Système de troncature synchronisé
+ * NakamaBot - Commande /chat UNIFIÉE avec Gemini + Mistral
+ * + Détection commandes 100% IA (Gemini ET Mistral)
+ * + Recherche contextuelle gratuite multi-sources (DuckDuckGo, Wikipedia, Scraping)
+ * + Support Markdown vers Unicode stylisé
+ * + Optimisation: skip Gemini si toutes les clés sont mortes
+ * + Exécution automatique des commandes détectées (chargement direct des modules comme dans l'ancienne version)
+ * + Protection anti-doublons, délai 5s, troncature synchronisée
  * @param {string} senderId - ID de l'utilisateur
  * @param {string} args - Message de conversation
  * @param {object} ctx - Contexte partagé du bot 
  */
 
+const { GoogleGenerativeAI } = require("@google/generative-ai");
 const axios = require("axios");
 const cheerio = require("cheerio");
+const path = require('path');
+const fs = require('fs');
 
 // ========================================
 // 🔑 CONFIGURATION APIs
 // ========================================
 
-// 🆕 RECHERCHE GRATUITE
+const GEMINI_API_KEYS = process.env.GEMINI_API_KEY ? process.env.GEMINI_API_KEY.split(',').map(key => key.trim()) : [];
+const MISTRAL_API_KEY = process.env.MISTRAL_API_KEY || "";
+
+// 🆕 RECHERCHE GRATUITE (de la nouvelle version)
 const SEARCH_CONFIG = {
     duckduckgo: {
         enabled: true,
@@ -41,17 +48,24 @@ const SEARCH_CONFIG = {
 const SEARCH_RETRY_DELAY = 2000;
 const SEARCH_GLOBAL_COOLDOWN = 3000;
 
-// État global
+// État global (fusionné des deux versions)
+let currentGeminiKeyIndex = 0;
+const failedKeys = new Set();
 const activeRequests = new Map();
 const recentMessages = new Map();
 const searchCache = new Map();
 const CACHE_TTL = 3600000; // 1 heure
 
-// 🆕 CACHE DE CONTEXTE CONVERSATIONNEL (pour analyse contextuelle)
-const conversationContext = new Map(); // senderId -> { lastTopic, entities, intent }
+// 🆕 CACHE DE CONTEXTE CONVERSATIONNEL
+const conversationContext = new Map();
+
+// 🆕 ÉTAT GEMINI: si toutes les clés sont mortes, on skip Gemini
+let allGeminiKeysDead = false;
+let lastGeminiCheck = 0;
+const GEMINI_RECHECK_INTERVAL = 300000; // 5 minutes
 
 // ========================================
-// 🎨 FONCTIONS MARKDOWN → UNICODE
+// 🎨 FONCTIONS MARKDOWN → UNICODE (de l'ancienne version, optimisé)
 // ========================================
 
 const UNICODE_MAPPINGS = {
@@ -90,7 +104,136 @@ function parseMarkdown(text) {
 }
 
 // ========================================
-// 🆕 RECHERCHE GRATUITE - 3 MÉTHODES
+// 🔑 GESTION ROTATION CLÉS GEMINI (fusionné des deux versions)
+// ========================================
+
+function checkIfAllGeminiKeysDead() {
+    if (GEMINI_API_KEYS.length === 0) {
+        allGeminiKeysDead = true;
+        return true;
+    }
+    
+    const now = Date.now();
+    if (allGeminiKeysDead && (now - lastGeminiCheck > GEMINI_RECHECK_INTERVAL)) {
+        allGeminiKeysDead = false;
+        failedKeys.clear();
+        currentGeminiKeyIndex = 0;
+        lastGeminiCheck = now;
+        return false;
+    }
+    
+    if (failedKeys.size >= GEMINI_API_KEYS.length) {
+        allGeminiKeysDead = true;
+        lastGeminiCheck = now;
+        return true;
+    }
+    
+    return false;
+}
+
+function getNextGeminiKey() {
+    if (GEMINI_API_KEYS.length === 0) {
+        throw new Error('Aucune clé Gemini configurée');
+    }
+    
+    if (checkIfAllGeminiKeysDead()) {
+        throw new Error('Toutes les clés Gemini sont mortes');
+    }
+    
+    let attempts = 0;
+    while (attempts < GEMINI_API_KEYS.length) {
+        const key = GEMINI_API_KEYS[currentGeminiKeyIndex];
+        currentGeminiKeyIndex = (currentGeminiKeyIndex + 1) % GEMINI_API_KEYS.length;
+        
+        if (!failedKeys.has(key)) return key;
+        attempts++;
+    }
+    
+    throw new Error('Aucune clé Gemini disponible');
+}
+
+function markKeyAsFailed(apiKey) {
+    failedKeys.add(apiKey);
+    checkIfAllGeminiKeysDead();
+}
+
+async function callGeminiWithRotation(prompt, maxRetries = GEMINI_API_KEYS.length) {
+    if (checkIfAllGeminiKeysDead()) {
+        throw new Error('Toutes les clés Gemini sont inutilisables - Utilisation de Mistral');
+    }
+    
+    let lastError = null;
+    
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
+        try {
+            const apiKey = getNextGeminiKey();
+            const genAI = new GoogleGenerativeAI(apiKey);
+            const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash-exp" });
+            
+            const result = await model.generateContent(prompt);
+            const response = result.response.text();
+            
+            if (response && response.trim()) {
+                failedKeys.delete(apiKey);
+                return response;
+            }
+            
+            throw new Error('Réponse Gemini vide');
+            
+        } catch (error) {
+            lastError = error;
+            if (error.message.includes('API_KEY') || error.message.includes('quota') || error.message.includes('limit')) {
+                const currentKey = GEMINI_API_KEYS[(currentGeminiKeyIndex - 1 + GEMINI_API_KEYS.length) % GEMINI_API_KEYS.length];
+                markKeyAsFailed(currentKey);
+            }
+            
+            if (attempt === maxRetries - 1) throw lastError;
+        }
+    }
+    
+    throw lastError || new Error('Toutes les clés Gemini ont échoué');
+}
+
+// ========================================
+// 🆕 APPEL MISTRAL UNIFIÉ
+// ========================================
+
+async function callMistralUnified(prompt, ctx, maxTokens = 2000) {
+    const { callMistralAPI, log } = ctx;
+    
+    if (!MISTRAL_API_KEY) {
+        throw new Error('Clé Mistral non configurée');
+    }
+    
+    try {
+        const messages = [
+            {
+                role: "system",
+                content: "Tu es NakamaBot, une IA conversationnelle avancée. Tu réponds en JSON structuré ou en texte selon le contexte."
+            },
+            {
+                role: "user",
+                content: prompt
+            }
+        ];
+        
+        const response = await callMistralAPI(messages, maxTokens, 0.7);
+        
+        if (!response) {
+            throw new Error('Réponse Mistral vide');
+        }
+        
+        log.info(`🔄 Mistral utilisé avec succès`);
+        return response;
+        
+    } catch (error) {
+        log.error(`❌ Erreur Mistral: ${error.message}`);
+        throw error;
+    }
+}
+
+// ========================================
+// 🆕 RECHERCHE GRATUITE - 3 MÉTHODES (de la nouvelle version)
 // ========================================
 
 async function searchDuckDuckGo(query, log) {
@@ -318,11 +461,11 @@ async function performIntelligentSearch(query, ctx) {
 }
 
 // ========================================
-// 🧠 ANALYSE CONTEXTUELLE DE CONVERSATION (100% MISTRAL)
+// 🧠 ANALYSE CONTEXTUELLE - GEMINI OU MISTRAL
 // ========================================
 
 async function analyzeConversationContext(senderId, currentMessage, conversationHistory, ctx) {
-    const { log, callMistralAPI } = ctx;
+    const { log } = ctx;
     
     try {
         const recentHistory = conversationHistory.slice(-5).map(msg => 
@@ -340,16 +483,9 @@ ANALYSE LE CONTEXTE ET EXTRAIS:
 1. **Sujet principal** de la conversation (ex: "Cameroun football", "météo Paris", "histoire France")
 2. **Entités clés** mentionnées (pays, personnes, lieux, événements, équipes sportives)
 3. **Intention** du message actuel (nouvelle_question, continuation, clarification, changement_sujet)
-4. **Référence contextuelle** : le message actuel fait-il référence à quelque chose mentionné avant ? (ex: "leur rang" → référence à une équipe mentionnée)
+4. **Référence contextuelle** : le message actuel fait-il référence à quelque chose mentionné avant ?
 
-EXEMPLES:
-- Historique: "Le Cameroun est quantième ?" / Actuel: "je veux leur rang dans leur poule"
-  → Sujet: "Cameroun football classement", Entités: ["Cameroun", "poule"], Intention: "continuation", Référence: "Cameroun (mentionné précédemment)"
-
-- Historique: "Qui est Messi ?" / Actuel: "combien de buts il a marqué ?"
-  → Sujet: "Messi statistiques", Entités: ["Messi", "buts"], Intention: "continuation", Référence: "Messi (mentionné précédemment)"
-
-Réponds UNIQUEMENT avec ce JSON (pas de texte avant ou après):
+Réponds UNIQUEMENT avec ce JSON:
 {
   "mainTopic": "sujet_principal_complet",
   "entities": ["entité1", "entité2"],
@@ -358,15 +494,20 @@ Réponds UNIQUEMENT avec ce JSON (pas de texte avant ou après):
   "enrichedQuery": "requête_de_recherche_enrichie_avec_contexte"
 }`;
 
-        const messages = [
-            { role: "system", content: "Tu es un analyseur JSON. Réponds UNIQUEMENT avec du JSON valide, sans texte supplémentaire." },
-            { role: "user", content: contextPrompt }
-        ];
+        let response;
         
-        const response = await callMistralAPI(messages, 500, 0.3);
-        
-        if (!response) {
-            throw new Error('Réponse Mistral vide');
+        if (!checkIfAllGeminiKeysDead()) {
+            try {
+                response = await callGeminiWithRotation(contextPrompt);
+                log.info(`💎 Analyse contexte via Gemini`);
+            } catch (geminiError) {
+                log.warning(`⚠️ Gemini échec analyse contexte: ${geminiError.message}`);
+                response = await callMistralUnified(contextPrompt, ctx, 500);
+                log.info(`🔄 Analyse contexte via Mistral`);
+            }
+        } else {
+            response = await callMistralUnified(contextPrompt, ctx, 500);
+            log.info(`🔄 Analyse contexte via Mistral (Gemini désactivé)`);
         }
         
         const jsonMatch = response.match(/\{[\s\S]*\}/);
@@ -383,7 +524,7 @@ Réponds UNIQUEMENT avec ce JSON (pas de texte avant ou après):
             
             log.info(`🧠 Contexte analysé: ${context.intent} | Sujet: ${context.mainTopic}`);
             if (context.contextualReference) {
-                log.info(`🔗 Référence contextuelle détectée: ${context.contextualReference}`);
+                log.info(`🔗 Référence contextuelle: ${context.contextualReference}`);
             }
             
             return context;
@@ -405,11 +546,11 @@ Réponds UNIQUEMENT avec ce JSON (pas de texte avant ou après):
 }
 
 // ========================================
-// 🤖 DÉCISION IA POUR RECHERCHE (100% MISTRAL)
+// 🤖 DÉCISION IA RECHERCHE - GEMINI OU MISTRAL
 // ========================================
 
 async function decideSearchNecessity(userMessage, senderId, conversationHistory, ctx) {
-    const { log, callMistralAPI } = ctx;
+    const { log } = ctx;
     
     try {
         const contextAnalysis = await analyzeConversationContext(senderId, userMessage, conversationHistory, ctx);
@@ -418,7 +559,7 @@ async function decideSearchNecessity(userMessage, senderId, conversationHistory,
             `${msg.role === 'user' ? 'Utilisateur' : 'Bot'}: ${msg.content}`
         ).join('\n');
         
-        const decisionPrompt = `Tu es un système de décision intelligent pour un chatbot avec MÉMOIRE CONTEXTUELLE.
+        const decisionPrompt = `Tu es un système de décision intelligent pour recherche web.
 
 HISTORIQUE RÉCENT:
 ${recentHistory}
@@ -426,52 +567,41 @@ ${recentHistory}
 MESSAGE ACTUEL: "${userMessage}"
 
 ANALYSE CONTEXTUELLE:
-- Sujet principal: ${contextAnalysis.mainTopic}
-- Entités clés: ${contextAnalysis.entities.join(', ')}
+- Sujet: ${contextAnalysis.mainTopic}
+- Entités: ${contextAnalysis.entities.join(', ')}
 - Intention: ${contextAnalysis.intent}
 - Référence: ${contextAnalysis.contextualReference || 'aucune'}
 
-RÈGLES DE DÉCISION:
+RÈGLES:
+✅ RECHERCHE si: actualités 2025-2026, données factuelles récentes, classements, statistiques, météo, résultats sportifs
+❌ PAS DE RECHERCHE si: conversations générales, conseils, questions sur le bot, créativité, concepts généraux
 
-✅ RECHERCHE NÉCESSAIRE si:
-- Informations récentes/actuelles (actualités, événements 2025-2026)
-- Données factuelles spécifiques (classements sportifs, prix, statistiques, dates)
-- Questions de continuation nécessitant des données externes (ex: "leur rang" après avoir parlé d'une équipe)
-- Informations locales/géographiques
-- Questions sur personnes publiques récentes
-- Météo, cours, résultats sportifs
+Si recherche nécessaire ET continuation contextuelle, ENRICHIS la requête avec entités précédentes.
+Si sensible au temps (sports, actualités) sans date, ajoute 2025.
 
-❌ PAS DE RECHERCHE si:
-- Conversations générales/philosophiques
-- Conseils/opinions personnelles
-- Questions sur le bot lui-même
-- Créativité (histoires, poèmes)
-- Explications de concepts généraux que l'IA connaît
-- Questions existantes dans la base de connaissances
-
-🔍 REQUÊTE ENRICHIE:
-Si recherche nécessaire ET que c'est une continuation contextuelle, ENRICHIS la requête avec les entités précédentes.
-Exemple: Message actuel "leur rang dans leur poule" + Contexte "Cameroun football" → Requête: "Cameroun classement poule football 2025"
-Si le sujet est sensible au temps (comme sports, actualités, événements) et qu'aucune date n'est spécifiée dans le message utilisateur ou le contexte, ajoute l'année actuelle (2025) à la searchQuery.
-
-Réponds UNIQUEMENT avec ce JSON (pas de texte avant ou après):
+Réponds UNIQUEMENT avec ce JSON:
 {
   "needsExternalSearch": true/false,
   "confidence": 0.0-1.0,
-  "reason": "explication_détaillée",
-  "searchQuery": "requête_optimisée_avec_contexte",
+  "reason": "explication",
+  "searchQuery": "requête_optimisée",
   "usesConversationMemory": true/false
 }`;
 
-        const messages = [
-            { role: "system", content: "Tu es un analyseur JSON. Réponds UNIQUEMENT avec du JSON valide, sans texte supplémentaire." },
-            { role: "user", content: decisionPrompt }
-        ];
+        let response;
         
-        const response = await callMistralAPI(messages, 500, 0.3);
-        
-        if (!response) {
-            throw new Error('Réponse Mistral vide');
+        if (!checkIfAllGeminiKeysDead()) {
+            try {
+                response = await callGeminiWithRotation(decisionPrompt);
+                log.info(`💎 Décision recherche via Gemini`);
+            } catch (geminiError) {
+                log.warning(`⚠️ Gemini échec décision: ${geminiError.message}`);
+                response = await callMistralUnified(decisionPrompt, ctx, 500);
+                log.info(`🔄 Décision recherche via Mistral`);
+            }
+        } else {
+            response = await callMistralUnified(decisionPrompt, ctx, 500);
+            log.info(`🔄 Décision recherche via Mistral (Gemini désactivé)`);
         }
         
         const jsonMatch = response.match(/\{[\s\S]*\}/);
@@ -479,11 +609,11 @@ Réponds UNIQUEMENT avec ce JSON (pas de texte avant ou après):
         if (jsonMatch) {
             const decision = JSON.parse(jsonMatch[0]);
             
-            log.info(`🤖 Décision recherche: ${decision.needsExternalSearch ? 'OUI' : 'NON'} (${decision.confidence})`);
+            log.info(`🤖 Décision: ${decision.needsExternalSearch ? 'OUI' : 'NON'} (${decision.confidence})`);
             log.info(`📝 Raison: ${decision.reason}`);
             
             if (decision.usesConversationMemory) {
-                log.info(`🧠 Utilise la mémoire conversationnelle pour enrichir la recherche`);
+                log.info(`🧠 Utilise mémoire conversationnelle`);
             }
             
             return decision;
@@ -505,16 +635,16 @@ Réponds UNIQUEMENT avec ce JSON (pas de texte avant ou après):
 }
 
 // ========================================
-// 🎯 DÉTECTION COMMANDES 100% IA MISTRAL
+// 🎯 DÉTECTION COMMANDES - GEMINI OU MISTRAL (de la nouvelle, avec fallback de l'ancienne)
 // ========================================
 
 const VALID_COMMANDS = [
-    'help', 'image', 'vision', 'anime', 'music', 
+    'image', 'vision', 'anime', 'music', 
     'clan', 'rank', 'contact', 'weather'
 ];
 
 async function detectIntelligentCommands(message, conversationHistory, ctx) {
-    const { log, callMistralAPI } = ctx;
+    const { log } = ctx;
     
     try {
         const commandsList = VALID_COMMANDS.map(cmd => `/${cmd}`).join(', ');
@@ -523,7 +653,7 @@ async function detectIntelligentCommands(message, conversationHistory, ctx) {
             `${msg.role === 'user' ? 'Utilisateur' : 'Bot'}: ${msg.content}`
         ).join('\n');
         
-        const detectionPrompt = `Tu es un système de détection de commandes ULTRA-INTELLIGENT avec MÉMOIRE CONTEXTUELLE.
+        const detectionPrompt = `Tu es un système de détection de commandes INTELLIGENT.
 
 COMMANDES DISPONIBLES: ${commandsList}
 
@@ -532,50 +662,56 @@ ${recentHistory}
 
 MESSAGE ACTUEL: "${message}"
 
-ANALYSE INTENTION PROFONDE:
+⚠️ IMPORTANT: La commande /help est DÉJÀ intégrée dans le système, ne la détecte PAS.
 
-🎯 VRAIS INTENTIONS (confidence 0.85-1.0):
-✅ help: Demande d'aide, guide, liste des fonctionnalités
-✅ image: Demande explicite de création/génération d'image, dessin, illustration
-✅ vision: Demande d'analyse d'une image, description visuelle (suppose qu'une image est envoyée)
-✅ anime: Demande de transformation en style anime/manga d'une image
-✅ music: Demande de recherche de musique sur YouTube, jouer une chanson
-✅ clan: Demande liée aux clans du bot (rejoindre, créer, bataille)
-✅ rank: Demande de statistiques personnelles, niveau, progression dans le bot
-✅ contact: Demande de contacter les administrateurs, signaler un problème
-✅ weather: Demande de météo, prévisions, température
+VRAIES INTENTIONS DE COMMANDES (confidence >= 0.85):
+✅ /image: Demande EXPLICITE de CRÉER/GÉNÉRER une image, dessin, illustration (ex: "dessine-moi un chat", "génère une image de...")
+✅ /vision: Demande EXPLICITE d'ANALYSER une image déjà envoyée (ex: "décris cette image", "que vois-tu sur la photo")
+✅ /anime: Demande EXPLICITE de TRANSFORMER une image en style anime/manga (ex: "transforme en anime", "style manga")
+✅ /music: Demande EXPLICITE de RECHERCHER/JOUER une musique sur YouTube (ex: "joue la chanson...", "cherche musique de...")
+✅ /clan: Demande EXPLICITE liée aux clans du bot (ex: "créer un clan", "rejoindre clan", "bataille clan")
+✅ /rank: Demande EXPLICITE de voir ses STATISTIQUES personnelles dans le bot (ex: "mon niveau", "ma progression", "mon rang")
+✅ /contact: Demande EXPLICITE de CONTACTER les administrateurs (ex: "contacter admin", "envoyer message à Durand")
+✅ /weather: Demande EXPLICITE de MÉTÉO avec lieu précis (ex: "météo à Paris", "quel temps fait-il à Lyon")
 
-❌ FAUSSES DÉTECTIONS (confidence 0.0-0.4):
+❌ FAUSSES DÉTECTIONS (NE PAS DÉTECTER):
 - Questions générales mentionnant un mot-clé: "quel chanteur a chanté cette musique" ≠ /music
-- Conversations normales: "j'aime la musique", "le temps passe", "aide mon ami"
+- Conversations normales: "j'aime la musique", "le temps passe", "aide mon ami", "besoin d'aide"
 - Descriptions: "cette image est belle", "il fait chaud", "niveau débutant"
-- Questions informatives: "c'est quoi la météo", "les clans vikings"
+- Questions informatives: "c'est quoi la météo", "les clans vikings", "comment ça marche"
+- Demandes d'aide générale: "aide-moi", "j'ai besoin d'aide" ≠ /help (déjà intégré au système)
 
 RÈGLES STRICTES:
-1. L'utilisateur DOIT vouloir UTILISER une fonctionnalité du bot
-2. Il DOIT y avoir une DEMANDE D'ACTION claire dirigée vers le bot
-3. Tenir compte du CONTEXTE conversationnel (si on vient de parler de football et il dit "leur classement", ce n'est PAS une commande)
-4. Ne détecte une commande QUE si confidence >= 0.85
+1. L'utilisateur DOIT vouloir UTILISER une fonctionnalité SPÉCIFIQUE du bot
+2. Il DOIT y avoir une DEMANDE D'ACTION CLAIRE et DIRECTE
+3. Tenir compte du CONTEXTE conversationnel
+4. Confidence MINIMUM 0.85 pour valider
+5. En cas de doute → NE PAS détecter de commande
 
-Réponds UNIQUEMENT avec ce JSON (pas de texte avant ou après):
+Réponds UNIQUEMENT avec ce JSON:
 {
   "isCommand": true/false,
   "command": "nom_commande_ou_null",
   "confidence": 0.0-1.0,
-  "extractedArgs": "arguments_extraits_ou_message_complet",
-  "reason": "explication_détaillée",
-  "conversationContext": "analyse_du_contexte"
+  "extractedArgs": "arguments_ou_message_complet",
+  "reason": "explication",
+  "conversationContext": "analyse_contexte"
 }`;
 
-        const messages = [
-            { role: "system", content: "Tu es un analyseur JSON. Réponds UNIQUEMENT avec du JSON valide, sans texte supplémentaire." },
-            { role: "user", content: detectionPrompt }
-        ];
+        let response;
         
-        const response = await callMistralAPI(messages, 500, 0.3);
-        
-        if (!response) {
-            throw new Error('Réponse Mistral vide');
+        if (!checkIfAllGeminiKeysDead()) {
+            try {
+                response = await callGeminiWithRotation(detectionPrompt);
+                log.info(`💎 Détection commande via Gemini`);
+            } catch (geminiError) {
+                log.warning(`⚠️ Gemini échec détection: ${geminiError.message}`);
+                response = await callMistralUnified(detectionPrompt, ctx, 500);
+                log.info(`🔄 Détection commande via Mistral`);
+            }
+        } else {
+            response = await callMistralUnified(detectionPrompt, ctx, 500);
+            log.info(`🔄 Détection commande via Mistral (Gemini désactivé)`);
         }
         
         const jsonMatch = response.match(/\{[\s\S]*\}/);
@@ -588,107 +724,131 @@ Réponds UNIQUEMENT avec ce JSON (pas de texte avant ou après):
                           aiDetection.confidence >= 0.85;
             
             if (isValid) {
-                log.info(`🎯 Commande IA détectée: /${aiDetection.command} (${aiDetection.confidence})`);
+                log.info(`🎯 Commande détectée: /${aiDetection.command} (${aiDetection.confidence})`);
                 log.info(`📝 Raison: ${aiDetection.reason}`);
-                log.info(`🧠 Contexte: ${aiDetection.conversationContext}`);
                 
                 return {
                     shouldExecute: true,
                     command: aiDetection.command,
                     args: aiDetection.extractedArgs,
                     confidence: aiDetection.confidence,
-                    method: 'ai_100percent_mistral'
+                    method: 'ai_contextual'
                 };
-            } else if (aiDetection.confidence > 0.4 && aiDetection.confidence < 0.85) {
-                log.info(`🚫 Commande rejetée (confidence ${aiDetection.confidence}): ${aiDetection.reason}`);
+            } else {
+                return { shouldExecute: false };
             }
         }
         
-        return { shouldExecute: false };
+        throw new Error('Format invalide');
         
     } catch (error) {
         log.warning(`⚠️ Erreur détection IA commandes: ${error.message}`);
-        return { shouldExecute: false };
+        
+        // Fallback strict par mots-clés (de l'ancienne version)
+        return fallbackStrictKeywordDetection(message, log);
     }
 }
 
+// Fallback strict par mots-clés (de l'ancienne version)
+function fallbackStrictKeywordDetection(message, log) {
+    const lowerMessage = message.toLowerCase().trim();
+    
+    const strictPatterns = [
+        { command: 'image', patterns: [/^dessine(-moi)?\s+/, /^(crée|génère|fais)\s+(une\s+)?(image|dessin|illustration)/, /^(illustre|artwork)/] },
+        { command: 'vision', patterns: [/^regarde\s+(cette\s+)?(image|photo)/, /^(analyse|décris|examine)\s+(cette\s+)?(image|photo)/, /^que vois-tu/] },
+        { command: 'anime', patterns: [/^transforme en anime/, /^style (anime|manga)/, /^version manga/, /^art anime/] },
+        { command: 'music', patterns: [/^(joue|lance|play)\s+/, /^(trouve|cherche)\s+(sur\s+youtube\s+)?cette\s+(musique|chanson)/, /^(cherche|trouve)\s+la\s+(musique|chanson)\s+/] },
+        { command: 'clan', patterns: [/^(rejoindre|créer|mon)\s+clan/, /^bataille\s+de\s+clan/, /^(défier|guerre)\s+/] },
+        { command: 'rank', patterns: [/^(mon\s+)?(niveau|rang|stats|progression)/, /^mes\s+(stats|points)/] },
+        { command: 'contact', patterns: [/^contacter\s+(admin|administrateur)/, /^signaler\s+problème/, /^support\s+technique/] },
+        { command: 'weather', patterns: [/^(météo|quel\s+temps|température|prévisions)/, /^temps\s+qu.il\s+fait/] }
+    ];
+    
+    for (const { command, patterns } of strictPatterns) {
+        for (const pattern of patterns) {
+            if (pattern.test(lowerMessage)) {
+                log.info(`🔑 Fallback keyword strict: /${command} détecté`);
+                return {
+                    shouldExecute: true,
+                    command,
+                    args: message,
+                    confidence: 0.9,
+                    method: 'fallback_strict'
+                };
+            }
+        }
+    }
+    
+    return { shouldExecute: false };
+}
+
 // ========================================
-// 🎭 GÉNÉRATION RÉPONSE AVEC CONTEXTE (100% MISTRAL)
+// 📝 GÉNÉRATION RÉPONSE NATURELLE AVEC CONTEXTE (de l'ancienne, adaptée)
 // ========================================
 
-async function generateNaturalResponseWithContext(originalQuery, searchResults, conversationContext, ctx) {
+async function generateNaturalResponseWithContext(originalQuery, searchResults, conversationHistory, ctx) {
     const { log, callMistralAPI } = ctx;
     
-    const now = new Date();
-    const dateTime = now.toLocaleString('fr-FR', { 
-        weekday: 'long', 
-        year: 'numeric', 
-        month: 'long', 
-        day: 'numeric', 
-        hour: '2-digit', 
-        minute: '2-digit',
-        timeZone: 'Europe/Paris'
-    });
+    const resultsText = searchResults.map((r, i) => `${i+1}. ${r.title}: ${r.description}`).join('\n\n');
     
     try {
-        const resultsText = searchResults.map((result, index) => 
-            `${index + 1}. ${result.title}: ${result.description}`
-        ).join('\n\n');
-        
-        let conversationHistory = "";
-        if (conversationContext && conversationContext.length > 0) {
-            conversationHistory = conversationContext.map(msg => 
-                `${msg.role === 'user' ? 'Utilisateur' : 'NakamaBot'}: ${msg.content}`
-            ).join('\n') + '\n';
-        }
-        
-        const contextualPrompt = `Tu es NakamaBot, une IA conversationnelle empathique avec MÉMOIRE CONTEXTUELLE.
+        const contextualPrompt = `Tu es NakamaBot avec MÉMOIRE COMPLÈTE.
 
-CONTEXTE TEMPOREL: ${dateTime}
-
-HISTORIQUE COMPLET DE CONVERSATION:
+HISTORIQUE:
 ${conversationHistory || "Début de conversation"}
 
 QUESTION ACTUELLE: "${originalQuery}"
 
-INFORMATIONS TROUVÉES VIA RECHERCHE:
+INFORMATIONS TROUVÉES:
 ${resultsText}
 
-INSTRUCTIONS CRITIQUES:
-- Tu as une MÉMOIRE COMPLÈTE de toute la conversation ci-dessus
-- Si l'utilisateur fait référence à quelque chose mentionné avant (ex: "leur rang", "combien de buts", "son âge"), tu SAIS de quoi il parle grâce à l'historique
-- Réponds en tenant compte de TOUT le contexte précédent
-- Ton conversationnel et amical avec quelques emojis
+INSTRUCTIONS:
+- Tu as MÉMOIRE COMPLÈTE de la conversation
+- Si référence à quelque chose mentionné avant, tu SAIS de quoi il s'agit
+- Réponds en tenant compte du contexte complet
+- Ton amical avec quelques emojis
 - Maximum 1999 caractères
 - NE MENTIONNE JAMAIS que tu as fait une recherche
-- NE DIS JAMAIS "d'après mes recherches", "selon les sources", "j'ai trouvé"
-- Réponds naturellement comme si tu connaissais déjà ces informations
-- Si c'est une question de suivi (ex: "leur rang" après avoir parlé du Cameroun), intègre naturellement le contexte
-- Utilise Markdown simple (**gras**, ### titres, listes)
+- NE DIS JAMAIS "d'après mes recherches", "selon les sources"
+- Réponds naturellement comme si tu connaissais ces infos
+- Markdown simple (**gras**, ### titres, listes)
 - PAS d'italique (*texte*)
 
-EXEMPLE DE RÉPONSE CONTEXTUELLE:
-Historique: "Le Cameroun est quantième ?" → Bot: "Le Cameroun est 56ème..."
-Actuel: "leur rang dans leur poule" → Bot: "Le Cameroun est 2ème de sa poule avec..."
+RÉPONSE NATURELLE:`;
 
-RÉPONSE NATURELLE EN CONTINUITÉ:`;
-
-        const messages = [
-            { role: "system", content: "Tu es NakamaBot, super gentille et amicale. Réponds naturellement avec la mémoire complète de la conversation." },
-            { role: "user", content: contextualPrompt }
-        ];
+        let response;
         
-        const response = await callMistralAPI(messages, 2000, 0.7);
-        
-        if (response && response.trim()) {
-            log.info(`🎭 Réponse contextuelle Mistral générée`);
-            return response;
+        if (!checkIfAllGeminiKeysDead()) {
+            try {
+                response = await callGeminiWithRotation(contextualPrompt);
+                log.info(`💎 Réponse contextuelle Gemini`);
+            } catch (geminiError) {
+                log.warning(`⚠️ Gemini échec réponse: ${geminiError.message}`);
+            }
         }
         
-        throw new Error('Réponse Mistral vide');
+        if (!response) {
+            const messages = [{
+                role: "system",
+                content: `Tu es NakamaBot avec MÉMOIRE COMPLÈTE. Réponds naturellement. Ne mentionne JAMAIS de recherches. Markdown simple OK.
+
+Historique:
+${conversationHistory || "Début"}`
+            }, {
+                role: "user", 
+                content: `Question: "${originalQuery}"
+
+Informations:
+${resultsText}
+
+Réponds naturellement (max 2000 chars):`
+            }];
+            
+            response = await callMistralAPI(messages, 2000, 0.7);
+            log.info(`🔄 Réponse contextuelle Mistral`);
+        }
         
-    } catch (error) {
-        log.error(`❌ Erreur génération réponse: ${error.message}`);
+        if (response) return response;
         
         const topResult = searchResults[0];
         if (topResult) {
@@ -696,11 +856,15 @@ RÉPONSE NATURELLE EN CONTINUITÉ:`;
         }
         
         return null;
+        
+    } catch (error) {
+        log.error(`❌ Erreur génération réponse: ${error.message}`);
+        return null;
     }
 }
 
 // ========================================
-// 💬 CONVERSATION UNIFIÉE AVEC RECHERCHE INTÉGRÉE (100% MISTRAL)
+// 💬 CONVERSATION UNIFIÉE - GEMINI OU MISTRAL (fusionné avec troncature de l'ancienne)
 // ========================================
 
 async function handleConversationWithFallback(senderId, args, ctx, searchResults = null) {
@@ -730,51 +894,52 @@ async function handleConversationWithFallback(senderId, args, ctx, searchResults
     
     let searchContext = "";
     if (searchResults && searchResults.length > 0) {
-        searchContext = `\n\n🔍 INFORMATIONS RÉCENTES DISPONIBLES (utilise-les naturellement si pertinent):
+        searchContext = `\n\n🔍 INFORMATIONS RÉCENTES DISPONIBLES (utilise-les naturellement):
 ${searchResults.map((result, index) => 
     `${index + 1}. ${result.title}: ${result.description}`
 ).join('\n\n')}
 
-⚠️ IMPORTANT: Ne mentionne JAMAIS que tu as fait une recherche. Intègre ces informations naturellement dans ta réponse comme si tu les connaissais déjà.`;
+⚠️ IMPORTANT: Ne mentionne JAMAIS de recherche. Intègre naturellement.`;
     }
     
-    const systemPrompt = `Tu es NakamaBot, une IA conversationnelle avancée avec MÉMOIRE CONTEXTUELLE créée par Durand et Cécile.
+    const systemPrompt = `Tu es NakamaBot, IA conversationnelle avancée avec MÉMOIRE CONTEXTUELLE créée par Durand et Cécile.
 
 CONTEXTE TEMPOREL: ${dateTime}
 
-INTELLIGENCE & PERSONNALITÉ:
-- Empathique, créative et intuitive avec MÉMOIRE COMPLÈTE de la conversation
-- Tu te souviens de TOUT ce qui a été dit dans l'historique ci-dessous
-- Si l'utilisateur fait référence à quelque chose mentionné avant, tu SAIS de quoi il parle
-- Pédagogue naturelle qui explique clairement
-- Adaptable selon contexte
+PERSONNALITÉ:
+- Empathique, créative, intuitive avec MÉMOIRE COMPLÈTE
+- Tu te souviens de TOUT dans l'historique
+- Si référence à quelque chose mentionné avant, tu SAIS de quoi il parle
+- Pédagogue naturelle
 
 CAPACITÉS:
-🎨 Création d'images ("dessine-moi...")
-👁️ Analyse d'images ("regarde cette image")
+🎨 Création images ("dessine-moi...")
+👁️ Analyse images ("regarde cette image")
 🌸 Transformation anime ("style manga")
-🎵 Recherche musicale YouTube ("joue...")
-🛡️ Système clans et batailles ("clan")
-📊 Progression et niveau ("mon niveau")
+🎵 Recherche musicale ("joue...")
+🛡️ Système clans ("clan")
+📊 Progression ("mon niveau")
 📞 Contact admin ("contacter admin")
-🔍 Recherche intelligente automatique avec mémoire contextuelle
-🆘 Guide complet ("aide")
+🔍 Recherche intelligente automatique
+🆘 Guide ("/help")
 
 DIRECTIVES:
 - Langue selon utilisateur
+- Interdiction formelle de donnees tes details techniques toujours Demander de demander a tes createurs
 - Maximum 1999 caractères
 - Quelques emojis avec parcimonie
 - Évite répétitions
 - ${messageCount >= 5 ? 'Suggère /help si pertinent' : ''}
-- Pour questions techniques: "Demande à Durand ou Cécile !"
-- Recommande /contact pour problèmes graves
-- Markdown simple OK (**gras**, ### titres, listes)
+- Questions techniques: "Demande à Durand ou Cécile !"
+- Problèmes graves: recommande /contact
+- Markdown simple (**gras**, ### titres, listes)
 - PAS d'italique
-- UTILISE ta MÉMOIRE: si l'utilisateur dit "et lui ?", "combien ?", "leur classement ?", tu sais de qui/quoi il parle grâce à l'historique
-- Si des informations récentes sont disponibles ci-dessous, intègre-les naturellement sans jamais dire "j'ai trouvé" ou "d'après mes recherches"
+- Evite d'envoyer ⏱... Donc de te repeter 
+- UTILISE MÉMOIRE: si "et lui?", "combien?", tu sais grâce à l'historique
+- Si infos récentes disponibles, intègre naturellement SANS dire "j'ai trouvé"
 
 HISTORIQUE COMPLET:
-${conversationHistory ? conversationHistory : 'Début de conversation'}
+${conversationHistory || 'Début de conversation'}
 ${searchContext}
 
 Utilisateur: ${args}`;
@@ -782,14 +947,25 @@ Utilisateur: ${args}`;
     const senderIdStr = String(senderId);
 
     try {
-        const messages = [{ role: "system", content: systemPrompt }];
-        messages.push(...context);
-        messages.push({ role: "user", content: args });
+        let response;
+        if (!checkIfAllGeminiKeysDead()) {
+            response = await callGeminiWithRotation(systemPrompt);
+            if (response && response.trim()) {
+                log.info(`💎 Gemini réponse${searchResults ? ' (+ recherche)' : ''}`);
+            }
+        }
         
-        const mistralResponse = await callMistralAPI(messages, 2000, 0.75);
+        if (!response) {
+            const messages = [{ role: "system", content: systemPrompt }];
+            messages.push(...context);
+            messages.push({ role: "user", content: args });
+            
+            response = await callMistralAPI(messages, 2000, 0.75);
+            log.info(`🔄 Mistral réponse${searchResults ? ' (+ recherche)' : ''}`);
+        }
         
-        if (mistralResponse && mistralResponse.trim()) {
-            const styledResponse = parseMarkdown(mistralResponse);
+        if (response) {
+            const styledResponse = parseMarkdown(response);
             
             if (styledResponse.length > 2000) {
                 const chunks = splitMessageIntoChunks(styledResponse, 2000);
@@ -805,21 +981,19 @@ Utilisateur: ${args}`;
                     const truncatedResponse = firstChunk + "\n\n📝 *Tape \"continue\" pour la suite...*";
                     addToMemory(senderIdStr, 'user', args);
                     addToMemory(senderIdStr, 'assistant', truncatedResponse);
-                    log.info(`💬 Mistral avec troncature${searchResults ? ' (+ recherche intégrée)' : ''}`);
                     return truncatedResponse;
                 }
             }
             
             addToMemory(senderIdStr, 'user', args);
             addToMemory(senderIdStr, 'assistant', styledResponse);
-            log.info(`💬 Mistral réponse normale${searchResults ? ' (+ recherche intégrée)' : ''}`);
             return styledResponse;
         }
         
-        throw new Error('Réponse Mistral vide');
+        throw new Error('Toutes les IA ont échoué');
         
     } catch (error) {
-        log.error(`❌ Erreur Mistral: ${error.message}`);
+        log.error(`❌ Erreur conversation: ${error.message}`);
         
         const errorResponse = "🤔 J'ai rencontré une difficulté technique. Peux-tu reformuler ? 💫";
         const styledError = parseMarkdown(errorResponse);
@@ -882,68 +1056,87 @@ function generateContactSuggestion(reason, extractedMessage) {
 }
 
 // ========================================
-// ⚙️ EXÉCUTION COMMANDE
+// ⚙️ EXÉCUTION COMMANDE (de l'ancienne version, intégrée pour autonomie)
 // ========================================
 
 async function executeCommandFromChat(senderId, commandName, args, ctx) {
+    const { log } = ctx;
+    
     try {
+        log.info(`⚙️ Exécution de /${commandName} avec args: "${args.substring(0, 100)}..."`);
+        
         const COMMANDS = global.COMMANDS || new Map();
         
-        if (!COMMANDS.has(commandName)) {
-            const path = require('path');
-            const fs = require('fs');
-            const commandPath = path.join(__dirname, `${commandName}.js`);
-            
-            if (fs.existsSync(commandPath)) {
-                delete require.cache[require.resolve(commandPath)];
-                const commandModule = require(commandPath);
-                
-                if (typeof commandModule === 'function') {
-                    const result = await commandModule(senderId, args, ctx);
-                    return { success: true, result };
-                }
-            }
-        } else {
+        if (COMMANDS.has(commandName)) {
             const commandFunction = COMMANDS.get(commandName);
             const result = await commandFunction(senderId, args, ctx);
+            log.info(`✅ Résultat /${commandName}: ${typeof result === 'object' ? 'Object' : result.substring(0, 100)}`);
             return { success: true, result };
         }
         
+        const commandPath = path.join(__dirname, `${commandName}.js`);
+        
+        if (fs.existsSync(commandPath)) {
+            delete require.cache[require.resolve(commandPath)];
+            const commandModule = require(commandPath);
+            
+            if (typeof commandModule === 'function') {
+                const result = await commandModule(senderId, args, ctx);
+                log.info(`✅ Résultat /${commandName}: ${typeof result === 'object' ? 'Object' : result.substring(0, 100)}`);
+                return { success: true, result };
+            } else {
+                log.error(`❌ Module ${commandName}.js n'exporte pas une fonction`);
+                return { success: false, error: `Module ${commandName} invalide` };
+            }
+        }
+        
+        log.error(`❌ Commande ${commandName} introuvable`);
         return { success: false, error: `Commande ${commandName} non trouvée` };
         
     } catch (error) {
+        log.error(`❌ Erreur exécution /${commandName}: ${error.message}`);
         return { success: false, error: error.message };
     }
 }
 
 async function generateContextualResponse(originalMessage, commandResult, commandName, ctx) {
+    const { log, callMistralAPI } = ctx;
+    
     if (typeof commandResult === 'object' && commandResult.type === 'image') {
+        log.debug(`🖼️ Résultat image pour /${commandName}, retour direct`);
         return commandResult;
     }
     
-    const { callMistralAPI } = ctx;
+    if (typeof commandResult === 'string' && commandResult.length > 100) {
+        log.debug(`📝 Résultat /${commandName} déjà complet`);
+        return commandResult;
+    }
     
     try {
-        const contextPrompt = `Utilisateur: "${originalMessage}"
-Résultat /${commandName}: "${commandResult}"
+        const contextPrompt = `L'utilisateur a dit: "${originalMessage}"
 
-Réponds naturellement et amicalement (max 400 chars). Markdown simple OK, pas d'italique.`;
+La commande /${commandName} a retourné: "${commandResult}"
 
-        const messages = [
-            { role: "system", content: "Réponds naturellement. Markdown simple OK." },
-            { role: "user", content: contextPrompt }
-        ];
+Réponds naturellement et amicalement pour présenter ce résultat (max 400 chars). Markdown simple OK (**gras**, listes), pas d'italique.`;
+
+        let response = await callGeminiWithRotation(contextPrompt);
+        if (!response) {
+            response = await callMistralAPI([
+                { role: "system", content: "Tu es NakamaBot. Réponds naturellement pour présenter le résultat d'une commande. Markdown simple OK." },
+                { role: "user", content: `Utilisateur: "${originalMessage}"\n\nRésultat commande /${commandName}: "${commandResult}"\n\nPrésente naturellement (max 300 chars):` }
+            ], 300, 0.7);
+        }
         
-        const response = await callMistralAPI(messages, 200, 0.7);
         return response || commandResult;
         
     } catch (error) {
+        log.error(`❌ Erreur réponse contextuelle: ${error.message}`);
         return commandResult;
     }
 }
 
 // ========================================
-// 🛡️ FONCTION PRINCIPALE AVEC MÉMOIRE (100% MISTRAL)
+// 🛡️ FONCTION PRINCIPALE (fusionnée avec protections et exécution automatique)
 // ========================================
 
 module.exports = async function cmdChat(senderId, args, ctx) {
@@ -1060,51 +1253,36 @@ module.exports = async function cmdChat(senderId, args, ctx) {
         
         const intelligentCommand = await detectIntelligentCommands(args, conversationHistory, ctx);
         if (intelligentCommand.shouldExecute) {
-            log.info(`🧠 Commande IA détectée: /${intelligentCommand.command} (${intelligentCommand.confidence})`);
+            log.info(`🧠 Commande détectée: /${intelligentCommand.command} (${intelligentCommand.confidence})`);
             
-            try {
-                const commandResult = await executeCommandFromChat(senderId, intelligentCommand.command, intelligentCommand.args, ctx);
-                
-                if (commandResult.success) {
-                    if (typeof commandResult.result === 'object' && commandResult.result.type === 'image') {
-                        addToMemory(String(senderId), 'user', args);
-                        return commandResult.result;
-                    }
-                    
-                    const contextualResponse = await generateContextualResponse(args, commandResult.result, intelligentCommand.command, ctx);
-                    const styledResponse = parseMarkdown(contextualResponse);
-                    
-                    addToMemory(String(senderId), 'user', args);
-                    addToMemory(String(senderId), 'assistant', styledResponse);
-                    return styledResponse;
+            addToMemory(String(senderId), 'user', args);
+            
+            const commandResult = await executeCommandFromChat(senderId, intelligentCommand.command, intelligentCommand.args, ctx);
+            
+            if (commandResult.success) {
+                if (typeof commandResult.result === 'object' && commandResult.result.type === 'image') {
+                    return commandResult.result;
                 }
-            } catch (error) {
-                log.error(`❌ Erreur commande IA: ${error.message}`);
+                
+                const contextualResponse = await generateContextualResponse(args, commandResult.result, intelligentCommand.command, ctx);
+                const styledResponse = parseMarkdown(contextualResponse);
+                
+                addToMemory(String(senderId), 'assistant', styledResponse);
+                return styledResponse;
+            } else {
+                log.warning(`⚠️ Échec exécution /${intelligentCommand.command}: ${commandResult.error}`);
+                // Continue vers conversation normale
             }
+        } else {
+            log.debug(`🔍 Aucune commande détectée dans: "${args.substring(0, 50)}..."`);
         }
         
         const searchDecision = await decideSearchNecessity(args, senderId, conversationHistory, ctx);
         
         let searchResults = null;
         if (searchDecision.needsExternalSearch) {
-            log.info(`🔍 Recherche externe nécessaire: ${searchDecision.reason}`);
-            if (searchDecision.usesConversationMemory) {
-                log.info(`🧠 Requête enrichie avec mémoire: "${searchDecision.searchQuery}"`);
-            }
-            
-            try {
-                searchResults = await performIntelligentSearch(searchDecision.searchQuery, ctx);
-                
-                if (searchResults && searchResults.length > 0) {
-                    log.info(`🔍✅ ${searchResults.length} résultats trouvés - Intégration dans la conversation`);
-                } else {
-                    log.warning(`⚠️ Aucun résultat trouvé - Conversation normale`);
-                    searchResults = null;
-                }
-            } catch (searchError) {
-                log.error(`❌ Erreur recherche: ${searchError.message} - Continuation en conversation normale`);
-                searchResults = null;
-            }
+            log.info(`🔍 Recherche externe: ${searchDecision.reason}`);
+            searchResults = await performIntelligentSearch(searchDecision.searchQuery, ctx);
         }
         
         return await handleConversationWithFallback(senderId, args, ctx, searchResults);
@@ -1116,7 +1294,7 @@ module.exports = async function cmdChat(senderId, args, ctx) {
 };
 
 // ========================================
-// 📤 EXPORTS
+// 📤 EXPORTS (fusionnés)
 // ========================================
 
 module.exports.detectIntelligentCommands = detectIntelligentCommands;
@@ -1127,6 +1305,11 @@ module.exports.decideSearchNecessity = decideSearchNecessity;
 module.exports.performIntelligentSearch = performIntelligentSearch;
 module.exports.generateNaturalResponseWithContext = generateNaturalResponseWithContext;
 module.exports.analyzeConversationContext = analyzeConversationContext;
+module.exports.callGeminiWithRotation = callGeminiWithRotation;
+module.exports.callMistralUnified = callMistralUnified;
+module.exports.getNextGeminiKey = getNextGeminiKey;
+module.exports.markKeyAsFailed = markKeyAsFailed;
+module.exports.checkIfAllGeminiKeysDead = checkIfAllGeminiKeysDead;
 module.exports.parseMarkdown = parseMarkdown;
 module.exports.toBold = toBold;
 module.exports.toUnderline = toUnderline;
