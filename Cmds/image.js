@@ -86,6 +86,8 @@ module.exports = async function cmdImage(senderId, args, ctx) {
         });
         return "❌ Oups ! Ta description est trop longue ! Maximum 500 caractères s'il te plaît ! 🌸";
     }
+    
+    // Images aléatoires si demandé
     if (prompt.toLowerCase() === "random") {
         const randomPrompts = [
             "beautiful fairy garden with sparkling flowers and butterflies",
@@ -101,10 +103,6 @@ module.exports = async function cmdImage(senderId, args, ctx) {
         ];
         prompt = randomPrompts[Math.floor(Math.random() * randomPrompts.length)];
     }
-    }
-    
-    // Images aléatoires si demandé
-    if (prompt.toLowerCase() === "random") {
     
     // Optimiser le prompt pour de meilleurs résultats
     const optimizedPrompt = optimizePromptForImageGeneration(prompt);
