@@ -162,6 +162,13 @@ function parseMarkdown(text) {
     return parsed;
 }
 
+// 🆕 Fonction pour nettoyer la réponse de l'IA en supprimant 🕒... ou multiples
+function cleanResponse(text) {
+    if (!text) return text;
+    // Supprime 🕒... isolé ou répété avec espaces
+    return text.replace(/🕒\.\.\.(\s*🕒\.\.\.)*/g, '').trim();
+}
+
 // ========================================
 // 🔑 GESTION ROTATION CLÉS GEMINI
 // ========================================
@@ -934,6 +941,9 @@ Réponds naturellement (max 2000 chars):`
             if (!response.trim()) {
                 response = "Désolé, je ne peux pas fournir cette explication spécifique pour le moment. Peux-tu reformuler ta question ?";
             }
+
+            // 🆕 Nettoyer la réponse avant de la retourner
+            response = cleanResponse(response);
             return response;
         }
         
@@ -1066,6 +1076,9 @@ Utilisateur: ${args}`;
             if (!response.trim()) {
                 response = "Désolé, je ne peux pas fournir cette explication spécifique pour le moment. Peux-tu reformuler ta question ?";
             }
+
+            // 🆕 Nettoyer la réponse avant de la styliser
+            response = cleanResponse(response);
             const styledResponse = parseMarkdown(response);
             
             if (styledResponse.length > 2000) {
@@ -1228,6 +1241,9 @@ Réponds naturellement et amicalement pour présenter ce résultat (max 400 char
             ], 300, 0.7);
         }
         
+        // 🆕 Nettoyer la réponse
+        response = cleanResponse(response);
+
         return response || commandResult;
         
     } catch (error) {
