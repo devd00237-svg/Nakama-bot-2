@@ -566,7 +566,8 @@ async function generateBoardImage(chess, userColor) {
     // ✅ Option 1: Lichess.org (SANS LOGO, gratuit, très fiable)
     const theme = 'brown'; // Thèmes: blue, brown, green, purple, ic
     const pieceSet = 'cburnett'; // Sets: alpha, cburnett, chess7, merida, spatial
-    const imageUrl = `https://lichess1.org/export/fen.gif?fen=${encodedFen}&theme=${theme}&piece=${pieceSet}&orientation=${orientation}&size=600`;
+    // Taille augmentée pour meilleure visibilité (max recommandé: 1024)
+    const imageUrl = `https://lichess1.org/export/fen.gif?fen=${encodedFen}&theme=${theme}&piece=${pieceSet}&orientation=${orientation}&size=1024`;
     
     // Option 2 (backup): Backscattering.de
     // const imageUrl = `https://backscattering.de/web-boardimage/board.svg?fen=${encodedFen}&orientation=${orientation}&size=400`;
