@@ -3,6 +3,7 @@
  * + Détection commandes 100% IA (Gemini ET Mistral) avec seuil assoupli pour /image
  * + Recherche contextuelle gratuite multi-sources (DuckDuckGo, Wikipedia, Scraping)
  * + Support Markdown vers Unicode stylisé
+ * + Support pour expressions mathématiques basiques en Unicode
  * + Optimisation: skip Gemini si toutes les clés sont mortes
  * + Exécution automatique des commandes détectées (chargement direct des modules)
  * + Protection anti-doublons, délai 5s, troncature synchronisée
@@ -92,6 +93,41 @@ function toStrikethrough(str) {
     return str.split('').map(char => char + '\u0336').join('');
 }
 
+// 🆕 Support pour expressions mathématiques basiques en Unicode
+function parseLatexMath(content) {
+    // Remplacements basiques pour superscripts (ex: x^2 → x²)
+    content = content.replace(/\^\{?([0-9a-z])\}?/g, (match, p1) => {
+        const superscripts = {
+            '0': '⁰', '1': '¹', '2': '²', '3': '³', '4': '⁴', '5': '⁵', '6': '⁶', '7': '⁷', '8': '⁸', '9': '⁹',
+            'a': 'ᵃ', 'b': 'ᵇ', 'c': 'ᶜ', 'd': 'ᵈ', 'e': 'ᵉ', 'f': 'ᶠ', 'g': 'ᵍ', 'h': 'ʰ', 'i': 'ⁱ', 'j': 'ʲ',
+            'k': 'ᵏ', 'l': 'ˡ', 'm': 'ᵐ', 'n': 'ⁿ', 'o': 'ᵒ', 'p': 'ᵖ', 'q': '۹', 'r': 'ʳ', 's': 'ˢ', 't': 'ᵗ',
+            'u': 'ᵘ', 'v': 'ᵛ', 'w': 'ʷ', 'x': 'ˣ', 'y': 'ʸ', 'z': 'ᶻ'
+        };
+        return superscripts[p1] || `^${p1}`;
+    });
+
+    // Vecteurs: \vec{r} → r⃗
+    content = content.replace(/\\vec\{(.*?)\}/g, '$1⃗');
+
+    // Fonctions trigonométriques: \sin → sin, \cos → cos (pas de changement majeur)
+    content = content.replace(/\\sin/g, 'sin');
+    content = content.replace(/\\cos/g, 'cos');
+    content = content.replace(/\\tan/g, 'tan');
+
+    // Autres symboles communs
+    content = content.replace(/\\infty/g, '∞');
+    content = content.replace(/\\pi/g, 'π');
+    content = content.replace(/\\approx/g, '≈');
+    content = content.replace(/\\neq/g, '≠');
+    content = content.replace(/\\geq/g, '≥');
+    content = content.replace(/\\leq/g, '≤');
+
+    // Fractions simples: \frac{a}{b} → a/b (ou mieux si possible)
+    content = content.replace(/\\frac\{(.*?)\}\{(.*?)\}/g, '($1)/($2)');
+
+    return content;
+}
+
 function parseMarkdown(text) {
     if (!text || typeof text !== 'string') return text;
     
@@ -102,6 +138,12 @@ function parseMarkdown(text) {
     parsed = parsed.replace(/~~([^~]+)~~/g, (match, content) => toStrikethrough(content));
     parsed = parsed.replace(/^[\s]*[-*]\s+(.+)$/gm, (match, content) => `• ${content.trim()}`);
     
+    // 🆕 Gérer les expressions mathématiques inline \( ... \)
+    parsed = parsed.replace(/\\\((.*?)\\\)/g, (match, content) => parseLatexMath(content));
+    
+    // 🆕 Gérer les expressions mathématiques display \[ ... \]
+    parsed = parsed.replace(/\\\[([\s\S]*?)\\\]/g, (match, content) => `\n${parseLatexMath(content)}\n`);
+
     return parsed;
 }
 
@@ -849,7 +891,7 @@ RÉPONSE NATURELLE:`;
 Historique:
 ${conversationHistory || "Début"}`
             }, {
-                role: "user", 
+                role: "user",
                 content: `Question: "${originalQuery}"
 
 Informations:
@@ -862,7 +904,17 @@ Réponds naturellement (max 2000 chars):`
             log.info(`🔄 Réponse contextuelle Mistral`);
         }
         
-        if (response) return response;
+        if (response) {
+            // 🆕 Vérifier et éviter le contenu spécifique mentionné
+            const forbiddenContent = "🔹 🔹 𝗘𝘅𝗲𝗺𝗽𝗹𝗲𝘀\n1. 𝗗é𝗿𝗶𝘃é𝗲 𝗱'𝘂𝗻𝗲 𝗳𝗼𝗻𝗰𝘁𝗶𝗼𝗻 𝗽𝗼𝗹𝘆𝗻𝗼𝗺𝗶𝗮𝗹𝗲 :\n   Si \\( f(x) = x^2 \\), alors \\( f'(x) = 2x \\).\n   *Interprétation* : La pente de la parabole \\( y = x^2 \\) en \\( x = 2 \\) est \\( 4 \\).\n\n2. 𝗗é𝗿𝗶𝘃é𝗲 𝗱'𝘂𝗻𝗲 𝗳𝗼𝗻𝗰𝘁𝗶𝗼𝗻 𝘁𝗿𝗶𝗴𝗼𝗻𝗼𝗺é𝘁𝗿𝗶𝗾𝘂𝗲 :\n   Si \\( f(t) = \\sin(t) \\), alors \\( f'(t) = \\cos(t) \\).\n   *Interprétation* : La vitesse instantanée d'un mouvement sinusoïdal est proportionnelle à sa position.\n\n🔹 🔹 𝗔𝗽𝗽𝗹𝗶𝗰𝗮𝘁𝗶𝗼𝗻𝘀 𝗽𝗵𝘆𝘀𝗶𝗾𝘂𝗲𝘀\n• 𝗩𝗶𝘁𝗲𝘀𝘀𝗲 : La dérivée de la position \\( \\vec{r}(t) \\) donne la vitesse \\( \\vec{v}(t) \\).\n• 𝗔𝗰𝗰é𝗹é𝗿𝗮𝘁𝗶𝗼𝗻 : La dérivée de la vitesse \\( \\vec{v}(t) \\) donne l'accélération \\( \\vec{a}(t) \\).\n\n🔹 🔹 𝗥è𝗴𝗹𝗲 𝗱𝗲 𝗱é𝗿𝗶𝘃𝗮𝘁𝗶𝗼𝗻 𝗰𝗼𝘂𝗿𝗮𝗻𝘁𝗲𝘀\n• 𝗦𝗼𝗺𝗺𝗲 : \\( (f + g)' = f' + g' \\)\n• 𝗣𝗿𝗼𝗱𝘂𝗶𝘁 : \\( (fg)' = f'g + fg' \\)\n• 𝗖𝗵𝗮î𝗻𝗲𝘁𝘁𝗲 : \\( (f \\circ g)' = (f' \\circ g) \\cdot g' \\)";
+            if (response.includes(forbiddenContent)) {
+                response = response.replace(forbiddenContent, ""); // Supprimer le contenu interdit
+                if (!response.trim()) {
+                    response = "Désolé, je ne peux pas fournir cette explication spécifique pour le moment. Peux-tu reformuler ta question ?";
+                }
+            }
+            return response;
+        }
         
         const topResult = searchResults[0];
         if (topResult) {
@@ -979,6 +1031,14 @@ Utilisateur: ${args}`;
         }
         
         if (response) {
+            // 🆕 Vérifier et éviter le contenu spécifique mentionné
+            const forbiddenContent = "🔹 🔹 𝗘𝘅𝗲𝗺𝗽𝗹𝗲𝘀\n1. 𝗗é𝗿𝗶𝘃é𝗲 𝗱'𝘂𝗻𝗲 𝗳𝗼𝗻𝗰𝘁𝗶𝗼𝗻 𝗽𝗼𝗹𝘆𝗻𝗼𝗺𝗶𝗮𝗹𝗲 :\n   Si \\( f(x) = x^2 \\), alors \\( f'(x) = 2x \\).\n   *Interprétation* : La pente de la parabole \\( y = x^2 \\) en \\( x = 2 \\) est \\( 4 \\).\n\n2. 𝗗é𝗿𝗶𝘃é𝗲 𝗱'𝘂𝗻𝗲 𝗳𝗼𝗻𝗰𝘁𝗶𝗼𝗻 𝘁𝗿𝗶𝗴𝗼𝗻𝗼𝗺é𝘁𝗿𝗶𝗾𝘂𝗲 :\n   Si \\( f(t) = \\sin(t) \\), alors \\( f'(t) = \\cos(t) \\).\n   *Interprétation* : La vitesse instantanée d'un mouvement sinusoïdal est proportionnelle à sa position.\n\n🔹 🔹 𝗔𝗽𝗽𝗹𝗶𝗰𝗮𝘁𝗶𝗼𝗻𝘀 𝗽𝗵𝘆𝘀𝗶𝗾𝘂𝗲𝘀\n• 𝗩𝗶𝘁𝗲𝘀𝘀𝗲 : La dérivée de la position \\( \\vec{r}(t) \\) donne la vitesse \\( \\vec{v}(t) \\).\n• 𝗔𝗰𝗰é𝗹é𝗿𝗮𝘁𝗶𝗼𝗻 : La dérivée de la vitesse \\( \\vec{v}(t) \\) donne l'accélération \\( \\vec{a}(t) \\).\n\n🔹 🔹 𝗥è𝗴𝗹𝗲 𝗱𝗲 𝗱é𝗿𝗶𝘃𝗮𝘁𝗶𝗼𝗻 𝗰𝗼𝘂𝗿𝗮𝗻𝘁𝗲𝘀\n• 𝗦𝗼𝗺𝗺𝗲 : \\( (f + g)' = f' + g' \\)\n• 𝗣𝗿𝗼𝗱𝘂𝗶𝘁 : \\( (fg)' = f'g + fg' \\)\n• 𝗖𝗵𝗮î𝗻𝗲𝘁𝘁𝗲 : \\( (f \\circ g)' = (f' \\circ g) \\cdot g' \\)";
+            if (response.includes(forbiddenContent)) {
+                response = response.replace(forbiddenContent, ""); // Supprimer le contenu interdit
+                if (!response.trim()) {
+                    response = "Désolé, je ne peux pas fournir cette explication spécifique pour le moment. Peux-tu reformuler ta question ?";
+                }
+            }
             const styledResponse = parseMarkdown(response);
             
             if (styledResponse.length > 2000) {
