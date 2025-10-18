@@ -1,11 +1,12 @@
 /**
- * Commande /echecs - Jeu d'échecs contre le bot dans Messenger
+ * Commande /echecs - Jeu d'échecs contre le bot dans Messenger avec images
  * @param {string} senderId - ID de l'utilisateur
  * @param {string} args - Arguments de la commande
  * @param {object} ctx - Contexte partagé du bot
  */
 
 const { Chess } = require('chess.js');
+const axios = require('axios');
 
 // ✅ État des parties d'échecs par utilisateur
 const chessGames = new Map();
@@ -22,7 +23,7 @@ const userActionLocks = new Map();
 const COOLDOWN_MS = 2000; // 2 secondes entre chaque action
 
 module.exports = async function cmdEchecs(senderId, args, ctx) {
-    const { log, addToMemory, sleep } = ctx;
+    const { log, addToMemory, sleep, sendImageMessage } = ctx;
     const senderIdStr = String(senderId);
     
     // ✅ PROTECTION ANTI-SPAM
@@ -46,14 +47,20 @@ module.exports = async function cmdEchecs(senderId, args, ctx) {
     // Commande /echecs (nouvelle partie ou aide)
     if (!command || command === 'aide' || command === 'help') {
         if (gameData && gameData.state !== GameState.FINISHED) {
-            return `♟️ Tu as une partie en cours !
+            const boardImage = await generateBoardImage(gameData.chess, gameData.userColor);
+            
+            return {
+                type: "image",
+                url: boardImage,
+                caption: `♟️ Tu as une partie en cours !
             
 📊 /echecs etat - Voir la position
 🎯 Envoie ton coup (ex: e2e4, Nf3)
 🏳️ /echecs abandon - Abandonner
 🔄 /echecs nouvelle - Nouvelle partie
             
-💡 Ta partie est active ! Joue ton coup !`;
+💡 Ta partie est active ! Joue ton coup !`
+            };
         }
         
         return `♟️ Jouer aux Échecs avec moi ! ✨
@@ -64,7 +71,7 @@ module.exports = async function cmdEchecs(senderId, args, ctx) {
 🔄 /echecs nouvelle - Nouvelle partie
 🏳️ /echecs abandon - Abandonner
 
-💖 Prêt(e) pour une partie ? /echecs !`;
+💖 Prêt(e) pour une partie ? Tape /echecs !`;
     }
     
     // ✅ Commande /echecs nouvelle
@@ -91,7 +98,7 @@ Abandonne d'abord pour en créer une nouvelle ! ♟️`;
 🆕 Tape /echecs pour démarrer ! ♟️`;
         }
         
-        return getGameStatus(gameData);
+        return await getGameStatus(gameData);
     }
     
     // ✅ Commande /echecs abandon
@@ -111,12 +118,18 @@ Abandonne d'abord pour en créer une nouvelle ! ♟️`;
         
         log.info(`🏳️ ${senderId} a abandonné la partie d'échecs`);
         
-        return `🏳️ Partie abandonnée !
+        const boardImage = await generateBoardImage(gameData.chess, gameData.userColor);
+        
+        return {
+            type: "image",
+            url: boardImage,
+            caption: `🏳️ Partie abandonnée !
         
 Résultat: ${gameData.result}
 Coups joués: ${gameData.history.length}
 
-🆕 Tape /echecs pour une nouvelle partie ! ♟️💕`;
+🆕 Tape /echecs pour une nouvelle partie ! ♟️💕`
+        };
     }
     
     // ✅ Si pas de commande spéciale, traiter comme un coup ou réponse
@@ -192,12 +205,16 @@ async function handleStarterResponse(senderId, response, gameData, log, addToMem
         
         log.info(`♟️ ${senderId} joue Blancs`);
         
-        return `✅ Tu joues les Blancs ! ♟️
-
-${getBoardRepresentation(gameData.chess)}
+        const boardImage = await generateBoardImage(gameData.chess, gameData.userColor);
+        
+        return {
+            type: "image",
+            url: boardImage,
+            caption: `✅ Tu joues les Blancs ! ♟️
 
 🎯 À toi de jouer !
-💡 Envoie ton coup (ex: e2e4, Nf3, d2d4)`;
+💡 Envoie ton coup (ex: e2e4, Nf3, d2d4)`
+        };
     }
     
     if (normalized === 'toi' || normalized === 'bot' || normalized === 'noir' || normalized === 'noirs') {
@@ -216,15 +233,19 @@ ${getBoardRepresentation(gameData.chess)}
         
         chessGames.set(senderId, gameData);
         
-        return `✅ Je joue les Blancs ! ♟️
-
-${getBoardRepresentation(gameData.chess)}
+        const boardImage = await generateBoardImage(gameData.chess, gameData.userColor);
+        
+        return {
+            type: "image",
+            url: boardImage,
+            caption: `✅ Je joue les Blancs ! ♟️
 
 🤖 Mon coup: ${botMoveResult.move}
 ${botMoveResult.annotation}
 
 🎯 À toi de jouer !
-💡 Envoie ton coup (ex: e7e5, Nf6)`;
+💡 Envoie ton coup (ex: e7e5, Nf6)`
+        };
     }
     
     // Réponse invalide
@@ -256,8 +277,6 @@ async function handleUserMove(senderId, moveText, gameData, log, addToMemory, sl
     // Vérifier que c'est au tour de l'utilisateur
     if (chess.turn() !== gameData.userColor) {
         return `⏰ Ce n'est pas ton tour !
-
-${getBoardRepresentation(chess)}
 
 Attends mon coup ! ♟️`;
     }
@@ -303,17 +322,23 @@ Attends mon coup ! ♟️`;
             return await handleGameOver(senderId, gameData, log, addToMemory);
         }
         
-        return `✅ Tu as joué: ${move.san}
-
-${getBoardRepresentation(chess)}
+        const boardImage = await generateBoardImage(chess, gameData.userColor);
+        
+        return {
+            type: "image",
+            url: boardImage,
+            caption: `✅ Tu as joué: ${move.san}
 
 🤖 Mon coup: ${botMoveResult.move}
 ${botMoveResult.annotation}
 
-🎯 À toi de jouer !`;
+🎯 À toi de jouer !`
+        };
         
     } catch (error) {
         log.warning(`⚠️ ${senderId} coup invalide: ${moveText}`);
+        
+        const possibleMoves = chess.moves().slice(0, 10).join(', ');
         
         return `❌ Coup invalide: "${moveText}"
 
@@ -323,9 +348,7 @@ Format attendu:
 • O-O (roque court)
 • O-O-O (roque long)
 
-${getBoardRepresentation(chess)}
-
-Coups possibles: ${chess.moves().slice(0, 10).join(', ')}${chess.moves().length > 10 ? '...' : ''}
+Coups possibles: ${possibleMoves}${chess.moves().length > 10 ? '...' : ''}
 
 💡 Réessaie ! ♟️`;
     }
@@ -441,16 +464,12 @@ async function handleGameOver(senderId, gameData, log, addToMemory) {
         if (userWon) {
             message = `🎉 ÉCHEC ET MAT ! Tu as gagné ! 👑
 
-${getBoardRepresentation(chess)}
-
 Résultat: ${result}
 Coups joués: ${gameData.history.length}
 
 Bravo champion ! 🏆💕`;
         } else {
             message = `🤖 ÉCHEC ET MAT ! J'ai gagné ! ♟️
-
-${getBoardRepresentation(chess)}
 
 Résultat: ${result}
 Coups joués: ${gameData.history.length}
@@ -473,8 +492,6 @@ Bien joué ! Revanche ? 💕`;
         
         message = `🤝 MATCH NUL ! ${drawReason}
 
-${getBoardRepresentation(chess)}
-
 Résultat: ${result}
 Coups joués: ${gameData.history.length}
 
@@ -487,20 +504,24 @@ Belle partie ! Revanche ? ♟️💕`;
     addToMemory(senderId, 'assistant', `Partie terminée: ${result}`);
     log.info(`♟️ Partie terminée pour ${senderId}: ${result}`);
     
-    return message + '\n\n🆕 Tape /echecs nouvelle pour rejouer !';
+    const boardImage = await generateBoardImage(chess, gameData.userColor);
+    
+    return {
+        type: "image",
+        url: boardImage,
+        caption: message + '\n\n🆕 Tape /echecs nouvelle pour rejouer !'
+    };
 }
 
 // ✅ FONCTION: Obtenir le statut de la partie
-function getGameStatus(gameData) {
+async function getGameStatus(gameData) {
     const chess = gameData.chess;
     const moveCount = gameData.history.length;
     const userColorName = gameData.userColor === 'w' ? 'Blancs' : 'Noirs';
     const currentTurn = chess.turn() === 'w' ? 'Blancs' : 'Noirs';
     const isUserTurn = chess.turn() === gameData.userColor;
     
-    let status = `📊 État de la partie ♟️
-
-${getBoardRepresentation(chess)}
+    let caption = `📊 État de la partie ♟️
 
 👤 Tu joues: ${userColorName}
 🎯 Tour: ${currentTurn} ${isUserTurn ? '(À toi !)' : '(À moi !)'}
@@ -510,52 +531,48 @@ ${getBoardRepresentation(chess)}
     
     // Afficher les derniers coups
     if (gameData.history.length > 0) {
-        status += '📜 Derniers coups:\n';
+        caption += '📜 Derniers coups:\n';
         const recentMoves = gameData.history.slice(-6);
         recentMoves.forEach((entry, idx) => {
             const icon = entry.player === 'user' ? '👤' : '🤖';
-            status += `${icon} ${entry.move}\n`;
+            caption += `${icon} ${entry.move}\n`;
         });
     }
     
     if (chess.inCheck()) {
-        status += '\n⚠️ ÉCHEC !';
+        caption += '\n⚠️ ÉCHEC !';
     }
     
-    status += `\n\n💡 ${isUserTurn ? 'Envoie ton coup !' : 'J\'y réfléchis...'}`;
+    caption += `\n\n💡 ${isUserTurn ? 'Envoie ton coup !' : 'J\'y réfléchis...'}`;
     
-    return status;
+    const boardImage = await generateBoardImage(chess, gameData.userColor);
+    
+    return {
+        type: "image",
+        url: boardImage,
+        caption: caption
+    };
 }
 
-// ✅ FONCTION: Représentation textuelle de l'échiquier
-function getBoardRepresentation(chess) {
-    const board = chess.board();
-    const pieces = {
-        'p': '♟', 'n': '♞', 'b': '♝', 'r': '♜', 'q': '♛', 'k': '♚',
-        'P': '♙', 'N': '♘', 'B': '♗', 'R': '♖', 'Q': '♕', 'K': '♔'
-    };
+// ✅ FONCTION: Générer une image du plateau d'échecs
+async function generateBoardImage(chess, userColor) {
+    // Obtenir le FEN (Forsyth-Edwards Notation) pour représenter la position
+    const fen = chess.fen();
     
-    let output = '  a b c d e f g h\n';
-    for (let i = 0; i < 8; i++) {
-        output += (8 - i) + ' ';
-        for (let j = 0; j < 8; j++) {
-            const square = board[i][j];
-            if (square) {
-                output += pieces[square.type.toUpperCase()] + (square.color === 'w' ? '' : '');
-                // Réutiliser les symboles car Messenger n'a qu'un jeu limité
-                if (square.color === 'b') {
-                    output = output.slice(0, -1) + pieces[square.type];
-                }
-            } else {
-                output += ((i + j) % 2 === 0 ? '□' : '■');
-            }
-            output += ' ';
-        }
-        output += (8 - i) + '\n';
-    }
-    output += '  a b c d e f g h';
+    // Déterminer l'orientation (blancs en bas si l'utilisateur joue blanc, sinon noirs en bas)
+    const flip = userColor === 'b' ? 'true' : 'false';
     
-    return output;
+    // Utiliser l'API lichess.org pour générer l'image du plateau
+    // Format: https://fen2image.chessvision.ai/FEN?flip=false&size=400
+    const encodedFen = encodeURIComponent(fen);
+    
+    // Option 1: Chess Vision AI (très fiable)
+    const imageUrl = `https://fen2image.chessvision.ai/${encodedFen}?flip=${flip}&size=600`;
+    
+    // Option 2 (backup): Backscattering.de
+    // const imageUrl = `https://backscattering.de/web-boardimage/board.svg?fen=${encodedFen}&orientation=${userColor === 'w' ? 'white' : 'black'}&size=400`;
+    
+    return imageUrl;
 }
 
 // ✅ Nettoyage automatique des parties anciennes (plus de 7 jours)
