@@ -11,83 +11,97 @@ const axios = require('axios');
 const REPLICATE_API_TOKEN = process.env.REPLICATE_API_TOKEN || "";
 const REPLICATE_API_URL = "https://api.replicate.com/v1/predictions";
 
-// ✅ Modèle AnimeGAN v2 sur Replicate (gratuit)
+// ✅ Modèle AnimeGAN v2 sur Replicate
 const ANIME_MODEL_VERSION = "5b9072e7f51f8c2f561a30b70dbfffea8062ab6cb51629a13c50af0d2c56bf0e";
 
 // ✅ Protection anti-spam
 const userAnimeRequests = new Map();
-const ANIME_COOLDOWN_MS = 15000; // 15 secondes entre chaque transformation
+const ANIME_COOLDOWN_MS = 15000; // 15 secondes
 
 module.exports = async function cmdAnime(senderId, args, ctx) {
     const { log, addToMemory, sleep, userLastImage } = ctx;
     const senderIdStr = String(senderId);
     
-    // ✅ Vérifier la configuration de l'API
+    // ✅ Vérifier la configuration
     if (!REPLICATE_API_TOKEN) {
         log.error("❌ REPLICATE_API_TOKEN manquant");
         return `❌ Service non configuré ! Demande à l'admin d'ajouter REPLICATE_API_TOKEN 💕`;
     }
     
-    // ✅ PROTECTION ANTI-SPAM
+    // ✅ Anti-spam
     const now = Date.now();
     if (userAnimeRequests.has(senderIdStr)) {
         const lastRequest = userAnimeRequests.get(senderIdStr);
         const timeSinceLastRequest = now - lastRequest;
         if (timeSinceLastRequest < ANIME_COOLDOWN_MS) {
             const remainingSeconds = Math.ceil((ANIME_COOLDOWN_MS - timeSinceLastRequest) / 1000);
-            return `⏰ Patience ! Attends ${remainingSeconds}s avant une nouvelle transformation ! 🎨`;
+            return `⏰ Attends ${remainingSeconds}s ! 🎨`;
         }
     }
     
     const command = args.toLowerCase().trim();
     
-    // ✅ Commande /anime aide
+    // ✅ Aide
     if (command === 'aide' || command === 'help') {
         return `🎨 Transformation Anime ! ✨
 
 📸 Étapes :
 1. Envoie une photo
 2. Tape /anime
-3. Reçois ta version anime !
+3. Magie ! 🎭
 
-💡 Tu peux aussi :
-/anime [URL]
-
-⏰ 15s entre chaque transformation
-💕 Amusez-vous bien !`;
+⏰ 15s de cooldown
+💕 Prête ?`;
     }
     
-    // ✅ Déterminer l'image à transformer
+    // ✅ Récupérer l'image
     let imageUrl = null;
     
-    // URL fournie en argument
     if (command && (command.startsWith('http://') || command.startsWith('https://'))) {
         imageUrl = command;
-    }
-    // Dernière image envoyée
-    else if (userLastImage.has(senderIdStr)) {
+    } else if (userLastImage.has(senderIdStr)) {
         imageUrl = userLastImage.get(senderIdStr);
-    }
-    // Aucune image
-    else {
-        return `📸 Envoie-moi d'abord une photo, puis tape /anime ! 💕`;
+    } else {
+        return `📸 Envoie-moi d'abord une photo ! 💕`;
     }
     
-    // ✅ Mettre à jour le cooldown
     userAnimeRequests.set(senderIdStr, now);
-    
     addToMemory(senderId, 'user', `/anime`);
     
     try {
         log.info(`🎨 Transformation anime pour ${senderId}`);
         
-        // ✅ Créer une prédiction
+        // ✅ SOLUTION : Télécharger l'image et la convertir en base64 data URI
+        let imageDataUri;
+        
+        try {
+            log.debug(`📥 Téléchargement image depuis: ${imageUrl.substring(0, 100)}...`);
+            
+            const imageResponse = await axios.get(imageUrl, {
+                responseType: 'arraybuffer',
+                timeout: 20000,
+                maxContentLength: 10 * 1024 * 1024 // 10MB max
+            });
+            
+            const imageBuffer = Buffer.from(imageResponse.data);
+            const contentType = imageResponse.headers['content-type'] || 'image/jpeg';
+            const base64Image = imageBuffer.toString('base64');
+            imageDataUri = `data:${contentType};base64,${base64Image}`;
+            
+            log.debug(`✅ Image téléchargée (${(imageBuffer.length / 1024).toFixed(2)} KB)`);
+            
+        } catch (downloadError) {
+            log.error(`❌ Erreur téléchargement image: ${downloadError.message}`);
+            throw new Error('Image inaccessible');
+        }
+        
+        // ✅ Créer la prédiction avec l'image en base64
         const createResponse = await axios.post(
             REPLICATE_API_URL,
             {
                 version: ANIME_MODEL_VERSION,
                 input: {
-                    image: imageUrl
+                    image: imageDataUri
                 }
             },
             {
@@ -100,17 +114,17 @@ module.exports = async function cmdAnime(senderId, args, ctx) {
         );
         
         if (createResponse.status !== 201) {
-            throw new Error(`Erreur API: ${createResponse.status}`);
+            throw new Error(`API Error: ${createResponse.status}`);
         }
         
         const predictionId = createResponse.data.id;
         const getUrl = createResponse.data.urls.get;
         
-        log.debug(`🔮 Prédiction: ${predictionId}`);
+        log.debug(`🔮 Prédiction créée: ${predictionId}`);
         
-        // ✅ Attendre le résultat (max 45 secondes)
+        // ✅ Polling pour le résultat
         let attempts = 0;
-        const maxAttempts = 45;
+        const maxAttempts = 60;
         let outputUrl = null;
         
         while (attempts < maxAttempts) {
@@ -126,43 +140,62 @@ module.exports = async function cmdAnime(senderId, args, ctx) {
             
             const status = statusResponse.data.status;
             
+            log.debug(`📊 Statut (${attempts}/${maxAttempts}): ${status}`);
+            
             if (status === 'succeeded') {
                 outputUrl = statusResponse.data.output;
-                log.info(`✅ Terminé: ${outputUrl}`);
+                log.info(`✅ Transformation terminée: ${outputUrl}`);
                 break;
             } else if (status === 'failed') {
-                throw new Error('Transformation échouée');
+                const errorMsg = statusResponse.data.error || 'Unknown error';
+                log.error(`❌ Transformation échouée: ${errorMsg}`);
+                throw new Error(`Échec: ${errorMsg}`);
             } else if (status === 'canceled') {
                 throw new Error('Transformation annulée');
             }
         }
         
         if (!outputUrl) {
-            throw new Error('Timeout');
+            throw new Error('Timeout après 60 secondes');
         }
         
-        addToMemory(senderId, 'assistant', 'Transformation anime OK');
+        addToMemory(senderId, 'assistant', 'Transformation anime réussie');
         
         return {
             type: "image",
             url: outputUrl,
-            caption: `✨ Ta version anime ! 🎭\n\n💕 Envoie une autre photo pour recommencer !`
+            caption: `✨ Ta version anime ! 🎭
+
+💕 Envoie une autre photo pour recommencer !`
         };
         
     } catch (error) {
-        log.error(`❌ Erreur anime ${senderId}: ${error.message}`);
+        log.error(`❌ Erreur transformation anime ${senderId}: ${error.message}`);
         
+        // Retirer le cooldown en cas d'erreur
         userAnimeRequests.delete(senderIdStr);
         
+        let errorMessage = `💔 Erreur... `;
+        
         if (error.response?.status === 401) {
-            return `❌ Token API invalide ! Contacte l'admin 💕`;
+            errorMessage += `Token API invalide ! 🔑`;
+        } else if (error.response?.status === 402) {
+            errorMessage += `Quota API dépassé ! 📊`;
         } else if (error.response?.status === 422) {
-            return `❌ Image invalide ! Envoie une vraie photo 📸💕`;
+            errorMessage += `Image invalide ! 📸`;
         } else if (error.message.includes('Timeout')) {
-            return `⏰ Transformation trop longue... Réessaie ! 💕`;
+            errorMessage += `Trop long... Réessaie ! ⏰`;
+        } else if (error.message.includes('inaccessible')) {
+            errorMessage += `Image inaccessible ! 🔒`;
         } else {
-            return `💔 Erreur technique... Réessaie plus tard ! 💕`;
+            errorMessage += `Erreur technique ! 🤖`;
         }
+        
+        errorMessage += `\n\n💕 Réessaie avec une autre photo !`;
+        
+        addToMemory(senderId, 'assistant', 'Erreur transformation anime');
+        
+        return errorMessage;
     }
 };
 
