@@ -1,23 +1,27 @@
 /**
  * Commande /anime - Transforme une image en style anime
- * Utilise Hugging Face Inference API (GRATUIT, sans clé)
+ * Utilise DeepAI API (GRATUIT avec crédits mensuels)
  * @param {string} senderId - ID de l'utilisateur
  * @param {string} args - Arguments de la commande
  * @param {object} ctx - Contexte partagé du bot
  */
 
 const axios = require('axios');
+const FormData = require('form-data');
+
+// ✅ Configuration DeepAI API (GRATUIT)
+const DEEPAI_API_KEY = process.env.DEEPAI_API_KEY || "quickstart-QUdJIGlzIGNvbWluZy4uLi4K";
+
+// ✅ Endpoints DeepAI pour transformation anime
+const DEEPAI_ENDPOINTS = [
+    'https://api.deepai.org/api/toonify', // Meilleur pour portraits
+    'https://api.deepai.org/api/CNNMRF', // Style artistique
+    'https://api.deepai.org/api/deepdream' // Style créatif
+];
 
 // ✅ Protection anti-spam
 const userAnimeRequests = new Map();
 const ANIME_COOLDOWN_MS = 10000; // 10 secondes
-
-// ✅ Modèles Hugging Face GRATUITS pour transformation anime
-const ANIME_MODELS = [
-    'SG161222/Realistic_Vision_V6.0_B1_noVAE', // Meilleur pour portraits réalistes -> anime
-    'prompthero/openjourney', // Style anime/manga
-    'XpucT/Deliberate' // Bon pour stylisation
-];
 
 module.exports = async function cmdAnime(senderId, args, ctx) {
     const { log, addToMemory, sleep, userLastImage } = ctx;
@@ -46,9 +50,9 @@ module.exports = async function cmdAnime(senderId, args, ctx) {
 3. Magie ! 🎭
 
 💡 Conseils :
-• Portrait de face recommandé
+• Portrait de face = meilleur résultat
 • Bonne luminosité
-• Visage bien visible
+• Photo claire
 
 ⏰ 10s entre transformations
 🆓 100% gratuit !
@@ -77,118 +81,114 @@ module.exports = async function cmdAnime(senderId, args, ctx) {
         let imageBuffer;
         
         try {
-            log.debug(`📥 Téléchargement image...`);
+            log.debug(`📥 Téléchargement...`);
             
             const imageResponse = await axios.get(imageUrl, {
                 responseType: 'arraybuffer',
                 timeout: 15000,
-                maxContentLength: 5 * 1024 * 1024 // 5MB max
+                maxContentLength: 5 * 1024 * 1024
             });
             
             imageBuffer = Buffer.from(imageResponse.data);
-            log.debug(`✅ Image téléchargée (${(imageBuffer.length / 1024).toFixed(2)} KB)`);
+            log.debug(`✅ Image (${(imageBuffer.length / 1024).toFixed(2)} KB)`);
             
         } catch (downloadError) {
             log.error(`❌ Téléchargement: ${downloadError.message}`);
             throw new Error('Image inaccessible');
         }
         
-        // ✅ Transformer avec Hugging Face Image-to-Image
-        let resultImageBuffer = null;
-        let modelUsed = null;
+        // ✅ Transformer avec DeepAI
+        let resultUrl = null;
+        let endpointUsed = null;
         
-        for (let i = 0; i < ANIME_MODELS.length; i++) {
-            const model = ANIME_MODELS[i];
+        for (let i = 0; i < DEEPAI_ENDPOINTS.length; i++) {
+            const endpoint = DEEPAI_ENDPOINTS[i];
             
             try {
-                log.debug(`🔄 Essai modèle ${i + 1}/${ANIME_MODELS.length}: ${model}`);
+                log.debug(`🔄 Essai endpoint ${i + 1}/${DEEPAI_ENDPOINTS.length}`);
                 
-                // ✅ Appel API Hugging Face Inference
-                const response = await axios.post(
-                    `https://api-inference.huggingface.co/models/${model}`,
-                    imageBuffer,
-                    {
-                        headers: {
-                            'Content-Type': 'application/octet-stream'
-                        },
-                        responseType: 'arraybuffer',
-                        timeout: 60000 // 60 secondes
-                    }
-                );
+                const formData = new FormData();
+                formData.append('image', imageBuffer, {
+                    filename: 'image.jpg',
+                    contentType: 'image/jpeg'
+                });
                 
-                if (response.status === 200 && response.data) {
-                    resultImageBuffer = Buffer.from(response.data);
-                    modelUsed = i + 1;
+                const response = await axios.post(endpoint, formData, {
+                    headers: {
+                        ...formData.getHeaders(),
+                        'api-key': DEEPAI_API_KEY
+                    },
+                    timeout: 60000
+                });
+                
+                if (response.status === 200 && response.data?.output_url) {
+                    resultUrl = response.data.output_url;
+                    endpointUsed = i + 1;
                     
-                    log.info(`✅ Transformation OK avec modèle ${modelUsed} (${(resultImageBuffer.length / 1024).toFixed(2)} KB)`);
+                    log.info(`✅ Transformation OK (endpoint ${endpointUsed})`);
                     break;
                 }
                 
             } catch (apiError) {
-                log.warning(`⚠️ Modèle ${i + 1} échoué: ${apiError.response?.status || apiError.message}`);
+                log.warning(`⚠️ Endpoint ${i + 1} échoué: ${apiError.response?.status || apiError.message}`);
                 
-                // Si le modèle charge (503), attendre et réessayer
-                if (apiError.response?.status === 503 && i === 0) {
-                    log.info(`⏳ Modèle en chargement, attente 15s...`);
-                    await sleep(15000);
-                    
-                    try {
-                        const retryResponse = await axios.post(
-                            `https://api-inference.huggingface.co/models/${model}`,
-                            imageBuffer,
-                            {
-                                headers: {
-                                    'Content-Type': 'application/octet-stream'
-                                },
-                                responseType: 'arraybuffer',
-                                timeout: 60000
-                            }
-                        );
+                // Si rate limit ou modèle en charge, attendre
+                if (apiError.response?.status === 429 || apiError.response?.status === 503) {
+                    if (i === 0) {
+                        log.info(`⏳ Attente 10s...`);
+                        await sleep(10000);
                         
-                        if (retryResponse.status === 200 && retryResponse.data) {
-                            resultImageBuffer = Buffer.from(retryResponse.data);
-                            modelUsed = i + 1;
+                        try {
+                            const retryFormData = new FormData();
+                            retryFormData.append('image', imageBuffer, {
+                                filename: 'image.jpg',
+                                contentType: 'image/jpeg'
+                            });
                             
-                            log.info(`✅ OK après retry (${(resultImageBuffer.length / 1024).toFixed(2)} KB)`);
-                            break;
+                            const retryResponse = await axios.post(endpoint, retryFormData, {
+                                headers: {
+                                    ...retryFormData.getHeaders(),
+                                    'api-key': DEEPAI_API_KEY
+                                },
+                                timeout: 60000
+                            });
+                            
+                            if (retryResponse.status === 200 && retryResponse.data?.output_url) {
+                                resultUrl = retryResponse.data.output_url;
+                                endpointUsed = i + 1;
+                                
+                                log.info(`✅ OK après retry (endpoint ${endpointUsed})`);
+                                break;
+                            }
+                        } catch (retryError) {
+                            log.warning(`⚠️ Retry échoué`);
                         }
-                    } catch (retryError) {
-                        log.warning(`⚠️ Retry échoué: ${retryError.message}`);
                     }
                 }
                 
-                // Essayer le modèle suivant
-                if (i < ANIME_MODELS.length - 1) {
+                // Essayer l'endpoint suivant
+                if (i < DEEPAI_ENDPOINTS.length - 1) {
                     await sleep(2000);
                 }
             }
         }
         
-        if (!resultImageBuffer) {
-            throw new Error('Tous les modèles ont échoué');
+        if (!resultUrl) {
+            throw new Error('Tous les endpoints ont échoué');
         }
         
-        // ✅ Héberger l'image sur ImgBB (gratuit)
-        try {
-            const uploadedUrl = await uploadToImgBB(resultImageBuffer, log);
-            
-            addToMemory(senderId, 'assistant', 'Transformation anime OK');
-            
-            return {
-                type: "image",
-                url: uploadedUrl,
-                caption: `✨ Ta version anime ! 🎭
+        addToMemory(senderId, 'assistant', 'Transformation anime OK');
+        
+        return {
+            type: "image",
+            url: resultUrl,
+            caption: `✨ Ta version anime ! 🎭
 
-🤖 Modèle ${modelUsed} utilisé
-🆓 100% gratuit
+🤖 Style ${endpointUsed} utilisé
+🆓 Gratuit via DeepAI
 
 💕 Envoie une autre photo !`
-            };
-            
-        } catch (uploadError) {
-            log.error(`❌ Upload: ${uploadError.message}`);
-            throw new Error('Erreur hébergement');
-        }
+        };
         
     } catch (error) {
         log.error(`❌ Erreur ${senderId}: ${error.message}`);
@@ -201,8 +201,8 @@ module.exports = async function cmdAnime(senderId, args, ctx) {
             errorMessage += `Image inaccessible ! 🔒`;
         } else if (error.message.includes('échoué')) {
             errorMessage += `Service temporairement indisponible ! ⏰`;
-        } else if (error.message.includes('hébergement')) {
-            errorMessage += `Erreur d'hébergement ! 📤`;
+        } else if (error.response?.status === 402) {
+            errorMessage += `Quota API dépassé ! 📊\nUtilise ta propre clé DeepAI gratuite sur deepai.org`;
         } else {
             errorMessage += `Erreur technique ! 🤖`;
         }
@@ -214,82 +214,6 @@ module.exports = async function cmdAnime(senderId, args, ctx) {
         return errorMessage;
     }
 };
-
-// ✅ Héberger sur ImgBB (100% gratuit, anonyme)
-async function uploadToImgBB(imageBuffer, log) {
-    try {
-        // ImgBB accepte les uploads anonymes (pas de clé API nécessaire pour usage basique)
-        // Clé publique de démo - remplace par ta propre clé gratuite sur https://api.imgbb.com/
-        const IMGBB_API_KEY = process.env.IMGBB_API_KEY || "d139aa9922a0b30a3e21c9f726049f87";
-        
-        const base64Image = imageBuffer.toString('base64');
-        
-        // ImgBB accepte les données en form-urlencoded
-        const formData = new URLSearchParams();
-        formData.append('image', base64Image);
-        
-        const response = await axios.post(
-            `https://api.imgbb.com/1/upload?key=${IMGBB_API_KEY}`,
-            formData,
-            {
-                headers: {
-                    'Content-Type': 'application/x-www-form-urlencoded'
-                },
-                timeout: 30000
-            }
-        );
-        
-        if (response.data?.data?.url) {
-            log.info(`✅ Image hébergée: ${response.data.data.url}`);
-            return response.data.data.url;
-        } else {
-            throw new Error('Réponse ImgBB invalide');
-        }
-        
-    } catch (error) {
-        log.error(`❌ ImgBB: ${error.message}`);
-        
-        // Backup : Imgur (anonyme)
-        try {
-            return await uploadToImgur(imageBuffer, log);
-        } catch (imgurError) {
-            throw new Error('Échec hébergement');
-        }
-    }
-}
-
-// ✅ Backup : Imgur (anonyme)
-async function uploadToImgur(imageBuffer, log) {
-    try {
-        // Client ID public Imgur pour usage anonyme
-        const IMGUR_CLIENT_ID = process.env.IMGUR_CLIENT_ID || "546c25a59c58ad7";
-        
-        const base64Image = imageBuffer.toString('base64');
-        
-        const response = await axios.post(
-            'https://api.imgur.com/3/image',
-            { image: base64Image },
-            {
-                headers: {
-                    'Authorization': `Client-ID ${IMGUR_CLIENT_ID}`,
-                    'Content-Type': 'application/json'
-                },
-                timeout: 30000
-            }
-        );
-        
-        if (response.data?.data?.link) {
-            log.info(`✅ Image sur Imgur: ${response.data.data.link}`);
-            return response.data.data.link;
-        } else {
-            throw new Error('Réponse Imgur invalide');
-        }
-        
-    } catch (error) {
-        log.error(`❌ Imgur: ${error.message}`);
-        throw error;
-    }
-}
 
 // ✅ Nettoyage automatique
 setInterval(() => {
