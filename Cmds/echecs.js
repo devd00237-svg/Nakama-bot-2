@@ -559,18 +559,21 @@ async function generateBoardImage(chess, userColor) {
     // Obtenir le FEN (Forsyth-Edwards Notation) pour représenter la position
     const fen = chess.fen();
     
-    // Déterminer l'orientation (blancs en bas si l'utilisateur joue blanc, sinon noirs en bas)
-    const flip = userColor === 'b' ? 'true' : 'false';
-    
-    // Utiliser l'API lichess.org pour générer l'image du plateau
-    // Format: https://fen2image.chessvision.ai/FEN?flip=false&size=400
+    // Déterminer l'orientation
+    const orientation = userColor === 'w' ? 'white' : 'black';
     const encodedFen = encodeURIComponent(fen);
     
-    // Option 1: Chess Vision AI (très fiable)
-    const imageUrl = `https://fen2image.chessvision.ai/${encodedFen}?flip=${flip}&size=600`;
+    // ✅ Option 1: Lichess.org (SANS LOGO, gratuit, très fiable)
+    const theme = 'brown'; // Thèmes: blue, brown, green, purple, ic
+    const pieceSet = 'cburnett'; // Sets: alpha, cburnett, chess7, merida, spatial
+    const imageUrl = `https://lichess1.org/export/fen.gif?fen=${encodedFen}&theme=${theme}&piece=${pieceSet}&orientation=${orientation}&size=600`;
     
     // Option 2 (backup): Backscattering.de
-    // const imageUrl = `https://backscattering.de/web-boardimage/board.svg?fen=${encodedFen}&orientation=${userColor === 'w' ? 'white' : 'black'}&size=400`;
+    // const imageUrl = `https://backscattering.de/web-boardimage/board.svg?fen=${encodedFen}&orientation=${orientation}&size=400`;
+    
+    // Option 3 (backup 2): Chess Vision AI (avec logo)
+    // const flip = userColor === 'b' ? 'true' : 'false';
+    // const imageUrl = `https://fen2image.chessvision.ai/${encodedFen}?flip=${flip}&size=600`;
     
     return imageUrl;
 }
