@@ -1450,11 +1450,11 @@ app.post('/webhook', async (req, res) => {
                     
                     // ✅ NOUVEAU: Vérification du blocage
                     if (!isAdmin(senderIdStr)) {
-                        const blockMode = commandData.get('blockMode');
-                        const blockMsg = commandData.get('blockMessage');
+                        const blockMode = clanData.get('blockMode');
+                        const blockMsg = clanData.get('blockMessage');
                         
                         // Vérifier la blacklist en premier (blocage permanent)
-                        const blacklist = commandData.get('blacklist') || new Map();
+                        const blacklist = clanData.get('blacklist') || new Map();
                         const blacklistMsg = blacklist.get(senderIdStr);
                         if (blacklistMsg) {
                             const sendResult = await sendMessage(senderId, blacklistMsg);
