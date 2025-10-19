@@ -7,10 +7,10 @@ const path = require('path');
 // - desactiver: Désactive tout blocage
 // - activer [message]: Bloque tout le monde
 // Réservé aux admins
-// Stockage persistant via clanData (sauvegardé sur GitHub)
+// Stockage persistant via commandData (sauvegardé sur GitHub)
 
 module.exports = async function blockCommand(senderId, args, context) {
-    const { isAdmin, clanData, saveDataImmediate, sendMessage, log } = context;
+    const { isAdmin, commandData, saveDataImmediate, sendMessage, log } = context;
 
     if (!isAdmin(senderId)) {
         log.warning(`⚠️ Tentative non-admin pour /block par ${senderId}`);
@@ -31,8 +31,8 @@ module.exports = async function blockCommand(senderId, args, context) {
                 if (!message) {
                     return "❌ Précise le message à envoyer aux nouveaux utilisateurs ! Ex: /block news Désolée, les nouveaux messages sont bloqués pour le moment ! 💕";
                 }
-                clanData.set('blockMode', 'new');
-                clanData.set('blockMessage', message);
+                commandData.set('blockMode', 'new');
+                commandData.set('blockMessage', message);
                 await saveDataImmediate();
                 log.info(`✅ Blocage activé pour les nouveaux par ${senderId}`);
                 return `✅ Blocage activé pour les NOUVEAUX utilisateurs ! Message: "${message}" 💕\n(Les admins ne sont pas affectés)`;
@@ -41,15 +41,15 @@ module.exports = async function blockCommand(senderId, args, context) {
                 if (!message) {
                     return "❌ Précise le message à envoyer aux anciens utilisateurs ! Ex: /block ancien Désolée, les messages sont bloqués pour maintenance ! 💕";
                 }
-                clanData.set('blockMode', 'old');
-                clanData.set('blockMessage', message);
+                commandData.set('blockMode', 'old');
+                commandData.set('blockMessage', message);
                 await saveDataImmediate();
                 log.info(`✅ Blocage activé pour les anciens par ${senderId}`);
                 return `✅ Blocage activé pour les ANCIENS utilisateurs ! Message: "${message}" 💕\n(Les admins ne sont pas affectés)`;
 
             case 'desactiver':
-                clanData.delete('blockMode');
-                clanData.delete('blockMessage');
+                commandData.delete('blockMode');
+                commandData.delete('blockMessage');
                 await saveDataImmediate();
                 log.info(`✅ Blocage désactivé par ${senderId}`);
                 return "✅ Tout blocage a été désactivé ! Les messages passent normalement maintenant. ✨";
@@ -58,8 +58,8 @@ module.exports = async function blockCommand(senderId, args, context) {
                 if (!message) {
                     return "❌ Précise le message à envoyer à tout le monde ! Ex: /block activer Le bot est en maintenance, réessaie plus tard ! 💕";
                 }
-                clanData.set('blockMode', 'all');
-                clanData.set('blockMessage', message);
+                commandData.set('blockMode', 'all');
+                commandData.set('blockMessage', message);
                 await saveDataImmediate();
                 log.info(`✅ Blocage activé pour tous par ${senderId}`);
                 return `✅ Blocage activé pour TOUS les utilisateurs ! Message: "${message}" 💕\n(Les admins ne sont pas affectés)`;
