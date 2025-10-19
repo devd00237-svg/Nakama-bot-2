@@ -1356,6 +1356,7 @@ app.get('/webhook', (req, res) => {
 });
 
 // ✅ WEBHOOK PRINCIPAL MODIFIÉ - AJOUT D'EXPÉRIENCE ET NOTIFICATIONS DE NIVEAU
+// ✅ WEBHOOK PRINCIPAL MODIFIÉ - AJOUT D'EXPÉRIENCE ET NOTIFICATIONS DE NIVEAU + GESTION DU BLOCAGE
 app.post('/webhook', async (req, res) => {
     try {
         const data = req.body;
@@ -1382,6 +1383,32 @@ app.post('/webhook', async (req, res) => {
                     if (wasNewUser) {
                         log.info(`👋 Nouvel utilisateur: ${senderId}`);
                         saveDataImmediate();
+                    }
+                    
+                    // ✅ NOUVEAU: Vérification du blocage
+                    if (!isAdmin(senderIdStr)) {
+                        const blockMode = clanData.get('blockMode');
+                        const blockMsg = clanData.get('blockMessage');
+                        
+                        if (blockMode && blockMsg) {
+                            let isBlocked = false;
+                            
+                            if (blockMode === 'all') {
+                                isBlocked = true;
+                            } else if (blockMode === 'new' && wasNewUser) {
+                                isBlocked = true;
+                            } else if (blockMode === 'old' && !wasNewUser) {
+                                isBlocked = true;
+                            }
+                            
+                            if (isBlocked) {
+                                const sendResult = await sendMessage(senderId, blockMsg);
+                                if (sendResult.success) {
+                                    log.info(`🚫 Message bloqué pour ${senderId} (mode: ${blockMode})`);
+                                }
+                                continue; // Passer à l'événement suivant
+                            }
+                        }
                     }
                     
                     if (event.message.attachments) {
