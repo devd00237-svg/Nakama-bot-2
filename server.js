@@ -30,6 +30,7 @@ let currentSearchEngineIndex = 0;
 const googleKeyUsage = new Map(); // Suivre l'utilisation des clés
 const GOOGLE_DAILY_LIMIT = 100; // Limite par clé par jour
 const GOOGLE_RETRY_DELAY = 5000; // Délai entre les tentatives (augmenté pour éviter 429)
+const userSpamData = new Map(); // Tracker anti-spam par user
 
 // Mémoire du bot (stockage local temporaire + sauvegarde permanente GitHub)
 const userMemory = new Map();
@@ -697,6 +698,14 @@ async function loadDataFromGitHub() {
                 log.info(`✅ ${Object.keys(data.truncatedMessages).length} messages tronqués chargés depuis GitHub`);
             }
 
+            // ✅ NOUVEAU: Charger les données anti-spam
+            if (data.userSpamData && typeof data.userSpamData === 'object') {
+                Object.entries(data.userSpamData).forEach(([userId, spamInfo]) => {
+                userSpamData.set(userId, spamInfo);
+                });
+                log.info(`✅ ${Object.keys(data.userSpamData).length} données anti-spam chargées depuis GitHub`);
+            }
+
             // ✅ NOUVEAU: Charger l'usage des clés Google
             if (data.googleKeyUsage && typeof data.googleKeyUsage === 'object') {
                 Object.entries(data.googleKeyUsage).forEach(([keyId, usage]) => {
@@ -1153,6 +1162,9 @@ const commandContext = {
     // 🆕 AJOUT: Fonctions de gestion de troncature
     splitMessageIntoChunks,
     isContinuationRequest,
+
+    commandData: clanData, // Map pour autres données de commandes
+    userSpamData, // ✅ NOUVEAU: Tracker anti-spam
     
     // Fonctions de sauvegarde GitHub
     saveDataToGitHub,
