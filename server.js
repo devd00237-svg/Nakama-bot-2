@@ -1206,6 +1206,57 @@ function loadCommands() {
     log.info(`🎉 ${COMMANDS.size} commandes chargées avec succès !`);
 }
 
+// === FONCTION ANTI-SPAM ===
+function isSpam(senderId, message) {
+    if (isAdmin(senderId)) return false; // Les admins bypass l'anti-spam
+    
+    // Normaliser le message pour ignorer les accents et casse
+    const normalized = message.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+    
+    // Détection spécifique pour les patterns connus
+    if (normalized === 'du brood' || normalized.includes('le blocage est lance')) {
+        return true;
+    }
+    
+    let spamInfo = userSpamData.get(senderId);
+    if (!spamInfo) {
+        spamInfo = {
+            lastMsg: '',
+            repeatCount: 0,
+            messages: [], // Timestamps des messages récents
+            lastCleanup: Date.now()
+        };
+    }
+    
+    const now = Date.now();
+    
+    // Nettoyage des anciens timestamps (garder seulement les 60 dernières secondes)
+    spamInfo.messages = spamInfo.messages.filter(ts => now - ts < 60000);
+    spamInfo.messages.push(now);
+    
+    // Rate limiting: > 10 messages en 60s = spam
+    if (spamInfo.messages.length > 10) {
+        userSpamData.set(senderId, spamInfo);
+        return true;
+    }
+    
+    // Détection de répétition
+    const normLast = spamInfo.lastMsg.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+    if (normalized === normLast) {
+        spamInfo.repeatCount++;
+        if (spamInfo.repeatCount >= 3) {
+            userSpamData.set(senderId, spamInfo);
+            return true;
+        }
+    } else {
+        spamInfo.repeatCount = 1;
+        spamInfo.lastMsg = message;
+    }
+    
+    userSpamData.set(senderId, spamInfo);
+    return false;
+}
+
 async function processCommand(senderId, messageText) {
     const senderIdStr = String(senderId);
     
@@ -1356,7 +1407,7 @@ app.get('/webhook', (req, res) => {
 });
 
 // ✅ WEBHOOK PRINCIPAL MODIFIÉ - AJOUT D'EXPÉRIENCE ET NOTIFICATIONS DE NIVEAU
-// ✅ WEBHOOK PRINCIPAL MODIFIÉ - AJOUT D'EXPÉRIENCE ET NOTIFICATIONS DE NIVEAU + GESTION DU BLOCAGE
+// ✅ WEBHOOK PRINCIPAL MODIFIÉ - AJOUT D'EXPÉRIENCE ET NOTIFICATIONS DE NIVEAU + GESTION DU BLOCAGE + ANTI-SPAM
 app.post('/webhook', async (req, res) => {
     try {
         const data = req.body;
@@ -1387,9 +1438,21 @@ app.post('/webhook', async (req, res) => {
                     
                     // ✅ NOUVEAU: Vérification du blocage
                     if (!isAdmin(senderIdStr)) {
-                        const blockMode = clanData.get('blockMode');
-                        const blockMsg = clanData.get('blockMessage');
+                        const blockMode = commandData.get('blockMode');
+                        const blockMsg = commandData.get('blockMessage');
                         
+                        // Vérifier la blacklist en premier (blocage permanent)
+                        const blacklist = commandData.get('blacklist') || new Map();
+                        const blacklistMsg = blacklist.get(senderIdStr);
+                        if (blacklistMsg) {
+                            const sendResult = await sendMessage(senderId, blacklistMsg);
+                            if (sendResult.success) {
+                                log.info(`🚫 Blacklist bloqué pour ${senderId}`);
+                            }
+                            continue; // Ignorer le message
+                        }
+                        
+                        // Puis le blocage général
                         if (blockMode && blockMsg) {
                             let isBlocked = false;
                             
@@ -1448,6 +1511,12 @@ app.post('/webhook', async (req, res) => {
                     
                     if (messageText) {
                         log.info(`📨 Message de ${senderId}: ${messageText.substring(0, 50)}...`);
+                        
+                        // ✅ NOUVEAU: Vérification anti-spam
+                        if (isSpam(senderIdStr, messageText)) {
+                            log.info(`🚫 Spam détecté de ${senderId}: ${messageText.substring(0, 50)}...`);
+                            continue; // Ignorer le message sans réponse
+                        }
                         
                         // ✅ NOUVEAU: Ajouter de l'expérience pour chaque message
                         if (messageText && rankCommand) {
