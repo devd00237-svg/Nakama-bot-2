@@ -701,7 +701,7 @@ async function loadDataFromGitHub() {
             // ✅ NOUVEAU: Charger les données anti-spam
             if (data.userSpamData && typeof data.userSpamData === 'object') {
                 Object.entries(data.userSpamData).forEach(([userId, spamInfo]) => {
-                userSpamData.set(userId, spamInfo);
+                    userSpamData.set(userId, spamInfo);
                 });
                 log.info(`✅ ${Object.keys(data.userSpamData).length} données anti-spam chargées depuis GitHub`);
             }
@@ -1163,7 +1163,6 @@ const commandContext = {
     splitMessageIntoChunks,
     isContinuationRequest,
 
-    commandData: clanData, // Map pour autres données de commandes
     userSpamData, // ✅ NOUVEAU: Tracker anti-spam
     
     // Fonctions de sauvegarde GitHub
@@ -1218,7 +1217,7 @@ function loadCommands() {
     log.info(`🎉 ${COMMANDS.size} commandes chargées avec succès !`);
 }
 
-// === FONCTION ANTI-SPAM CORRIGÉE ===
+// === FONCTION ANTI-SPAM ===
 function isSpam(senderId, message) {
     if (isAdmin(senderId)) return false; // Les admins bypass l'anti-spam
     
@@ -1243,49 +1242,26 @@ function isSpam(senderId, message) {
     const now = Date.now();
     
     // Nettoyage des anciens timestamps (garder seulement les 60 dernières secondes)
-    spamInfo.messages = spamInfo.messages.filter(ts => now - ts > 60000 ? false : true);
+    spamInfo.messages = spamInfo.messages.filter(ts => now - ts < 60000);
     spamInfo.messages.push(now);
     
-    // Rate limiting global: > 10 messages en 60s = spam
+    // Rate limiting: > 10 messages en 60s = spam
     if (spamInfo.messages.length > 10) {
-        log.info(`🚫 Spam détecté (plus de 10 msg/60s) pour ${senderId}`);
         userSpamData.set(senderId, spamInfo);
         return true;
     }
     
-    // Correction: Ajout de burst rate limiting (3 messages en 2 secondes)
-    const recentBurst = spamInfo.messages.filter(ts => now - ts < 2000); // Messages dans les 2 dernières secondes
-    if (recentBurst.length > 3) {
-        log.info(`🚫 Spam burst détecté (plus de 3 msg/2s) pour ${senderId}`);
-        userSpamData.set(senderId, spamInfo);
-        return true;
-    }
-    
-    // Détection de répétition corrigée: >=3 messages identiques consécutifs
+    // Détection de répétition
     const normLast = spamInfo.lastMsg.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
     if (normalized === normLast) {
         spamInfo.repeatCount++;
         if (spamInfo.repeatCount >= 3) {
-            log.info(`🚫 Spam répétition détecté (${spamInfo.repeatCount} fois) pour ${senderId}`);
             userSpamData.set(senderId, spamInfo);
             return true;
         }
     } else {
         spamInfo.repeatCount = 1;
         spamInfo.lastMsg = message;
-    }
-    
-    // Ajout: Détection de similarité pour éviter les répétitions variées (e.g., ajout d'espaces)
-    if (spamInfo.messages.length >= 3) {
-        const lastThree = spamInfo.messages.slice(-3).map(ts => { /* Assumer que nous stockons aussi les messages normalisés si besoin */ });
-        // Pour simplifier, on utilise calculateSimilarity si disponible
-        if (calculateSimilarity(spamInfo.lastMsg, message) > 0.95) { // Haute similarité
-            spamInfo.repeatCount++;
-            if (spamInfo.repeatCount >= 3) {
-                log.info(`🚫 Spam similarité détecté pour ${senderId}`);
-                return true;
-            }
-        }
     }
     
     userSpamData.set(senderId, spamInfo);
@@ -1441,8 +1417,7 @@ app.get('/webhook', (req, res) => {
     }
 });
 
-// ✅ WEBHOOK PRINCIPAL MODIFIÉ - AJOUT D'EXPÉRIENCE ET NOTIFICATIONS DE NIVEAU
-// ✅ WEBHOOK PRINCIPAL MODIFIÉ - AJOUT D'EXPÉRIENCE ET NOTIFICATIONS DE NIVEAU + GESTION DU BLOCAGE + ANTI-SPAM
+// ✅ WEBHOOK PRINCIPAL CORRIGÉ - BLACKLIST FIX
 app.post('/webhook', async (req, res) => {
     try {
         const data = req.body;
@@ -1471,20 +1446,22 @@ app.post('/webhook', async (req, res) => {
                         saveDataImmediate();
                     }
                     
-                    // ✅ NOUVEAU: Vérification du blocage
+                    // ✅ CORRECTION BLACKLIST: Vérification du blocage avec gestion correcte
                     if (!isAdmin(senderIdStr)) {
                         const blockMode = clanData.get('blockMode');
                         const blockMsg = clanData.get('blockMessage');
                         
-                        // Vérifier la blacklist en premier (blocage permanent)
-                        const blacklist = clanData.get('blacklist') || new Map();
-                        const blacklistMsg = blacklist.get(senderIdStr);
-                        if (blacklistMsg) {
-                            const sendResult = await sendMessage(senderId, blacklistMsg);
-                            if (sendResult.success) {
-                                log.info(`🚫 Blacklist bloqué pour ${senderId}`);
+                        // ✅ FIX: Récupérer la blacklist correctement depuis clanData (Map)
+                        const blacklist = clanData.get('blacklist');
+                        if (blacklist && blacklist instanceof Map) {
+                            const blacklistMsg = blacklist.get(senderIdStr);
+                            if (blacklistMsg) {
+                                const sendResult = await sendMessage(senderId, blacklistMsg);
+                                if (sendResult.success) {
+                                    log.info(`🚫 Blacklist bloqué pour ${senderId}`);
+                                }
+                                continue; // Ignorer le message
                             }
-                            continue; // Ignorer le message
                         }
                         
                         // Puis le blocage général
