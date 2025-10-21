@@ -2,7 +2,7 @@
  * Commande /echecs - Jeu d'échecs intelligent avec niveaux de difficulté
  * @param {string} senderId - ID de l'utilisateur
  * @param {string} args - Arguments de la commande
- * @param {object} ctx - Contexte partagé du bot
+ * @param {object} ctx - Contexte partagé du bot 
  */
 
 const { Chess } = require('chess.js');
