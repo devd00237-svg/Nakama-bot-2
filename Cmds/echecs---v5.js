@@ -1,8 +1,8 @@
 /**
- * Commande /echecs - Jeu d'échecs intelligent avec niveaux de difficulté
+ * Commande /echecs - Jeu d'échecs contre le bot dans Messenger avec images
  * @param {string} senderId - ID de l'utilisateur
  * @param {string} args - Arguments de la commande
- * @param {object} ctx - Contexte partagé du bot 
+ * @param {object} ctx - Contexte partagé du bot
  */
 
 const { Chess } = require('chess.js');
@@ -13,24 +13,14 @@ const chessGames = new Map();
 
 // ✅ États possibles d'une partie
 const GameState = {
-    AWAITING_LEVEL: 'awaiting_level',
     AWAITING_STARTER: 'awaiting_starter',
     PLAYING: 'playing',
     FINISHED: 'finished'
 };
 
-// ✅ Niveaux de difficulté
-const DifficultyLevels = {
-    FACILE: { name: 'Facile', depth: 1, randomness: 0.4, emoji: '😊' },
-    MOYEN: { name: 'Moyen', depth: 2, randomness: 0.25, emoji: '🤔' },
-    DIFFICILE: { name: 'Difficile', depth: 3, randomness: 0.15, emoji: '😤' },
-    EXPERT: { name: 'Expert', depth: 4, randomness: 0.05, emoji: '🧠' },
-    MAITRE: { name: 'Maître', depth: 5, randomness: 0, emoji: '👑' }
-};
-
 // ✅ Protection anti-spam
 const userActionLocks = new Map();
-const COOLDOWN_MS = 2000;
+const COOLDOWN_MS = 2000; // 2 secondes entre chaque action
 
 module.exports = async function cmdEchecs(senderId, args, ctx) {
     const { log, addToMemory, sleep, sendImageMessage } = ctx;
@@ -58,13 +48,11 @@ module.exports = async function cmdEchecs(senderId, args, ctx) {
     if (!command || command === 'aide' || command === 'help') {
         if (gameData && gameData.state !== GameState.FINISHED) {
             const boardImage = await generateBoardImage(gameData.chess, gameData.userColor);
-            const levelInfo = gameData.difficulty ? `${gameData.difficulty.emoji} Niveau: ${gameData.difficulty.name}` : '';
             
             return {
                 type: "image",
                 url: boardImage,
                 caption: `♟️ Tu as une partie en cours !
-${levelInfo}
             
 📊 /echecs etat - Voir la position
 🎯 Envoie ton coup (ex: e2e4, Nf3)
@@ -76,20 +64,11 @@ ${levelInfo}
         }
         
         return `♟️ Jouer aux Échecs avec moi ! ✨
-
 🆕 /echecs - Démarrer une partie
 🎯 Format des coups: e2e4, Nf3, O-O
 📊 /echecs etat - Voir la position
 🔄 /echecs nouvelle - Nouvelle partie
 🏳️ /echecs abandon - Abandonner
-
-🎚️ Niveaux disponibles:
-${DifficultyLevels.FACILE.emoji} Facile - Débutant
-${DifficultyLevels.MOYEN.emoji} Moyen - Intermédiaire
-${DifficultyLevels.DIFFICILE.emoji} Difficile - Avancé
-${DifficultyLevels.EXPERT.emoji} Expert - Très fort
-${DifficultyLevels.MAITRE.emoji} Maître - Imbattable
-
 💖 Prêt(e) pour une partie ? Tape /echecs !`;
     }
     
@@ -101,10 +80,10 @@ ${DifficultyLevels.MAITRE.emoji} Maître - Imbattable
 Options:
 🏳️ /echecs abandon - Abandonner l'ancienne
 📊 /echecs etat - Voir la position actuelle
-
 Abandonne d'abord pour en créer une nouvelle ! ♟️`;
         }
         
+        // Créer une nouvelle partie
         return await createNewGame(senderIdStr, log, addToMemory);
     }
     
@@ -145,27 +124,23 @@ Abandonne d'abord pour en créer une nouvelle ! ♟️`;
         
 Résultat: ${gameData.result}
 Coups joués: ${gameData.history.length}
-
 🆕 Tape /echecs pour une nouvelle partie ! ♟️💕`
         };
     }
     
     // ✅ Si pas de commande spéciale, traiter comme un coup ou réponse
     if (!gameData) {
+        // Pas de partie → créer une nouvelle
         return await createNewGame(senderIdStr, log, addToMemory);
     }
     
     // ✅ Gérer selon l'état de la partie
     switch (gameData.state) {
-        case GameState.AWAITING_LEVEL:
-            return await handleLevelSelection(senderIdStr, args, gameData, log, addToMemory);
-        
         case GameState.AWAITING_STARTER:
             return await handleStarterResponse(senderIdStr, args, gameData, log, addToMemory, sleep, ctx);
         
         case GameState.PLAYING:
-            await handleUserMove(senderIdStr, args, gameData, log, addToMemory, sleep, ctx);
-            return;
+            return await handleUserMove(senderIdStr, args, gameData, log, addToMemory, sleep, ctx);
         
         case GameState.FINISHED:
             return `✅ Cette partie est terminée !
@@ -185,8 +160,7 @@ async function createNewGame(senderId, log, addToMemory) {
     
     const gameData = {
         chess: game,
-        state: GameState.AWAITING_LEVEL,
-        difficulty: null,
+        state: GameState.AWAITING_STARTER,
         userColor: null,
         botColor: null,
         history: [],
@@ -197,74 +171,14 @@ async function createNewGame(senderId, log, addToMemory) {
     chessGames.set(senderId, gameData);
     
     addToMemory(senderId, 'user', 'Nouvelle partie d\'échecs');
-    addToMemory(senderId, 'assistant', 'Choix du niveau');
+    addToMemory(senderId, 'assistant', 'Partie créée - choix du joueur');
     
     log.info(`♟️ Nouvelle partie d'échecs créée pour ${senderId}`);
     
     return `♟️ Nouvelle partie d'échecs ! ✨
-
-🎚️ Choisis ton niveau :
-
-1️⃣ ${DifficultyLevels.FACILE.emoji} Facile - Pour débuter
-2️⃣ ${DifficultyLevels.MOYEN.emoji} Moyen - Bon niveau
-3️⃣ ${DifficultyLevels.DIFFICILE.emoji} Difficile - Challengeant
-4️⃣ ${DifficultyLevels.EXPERT.emoji} Expert - Très fort
-5️⃣ ${DifficultyLevels.MAITRE.emoji} Maître - Imbattable
-
-💡 Réponds avec le numéro (1 à 5) !`;
-}
-
-// ✅ FONCTION: Gérer la sélection du niveau
-async function handleLevelSelection(senderId, response, gameData, log, addToMemory) {
-    const normalized = response.trim();
-    
-    let selectedLevel = null;
-    
-    // Accepter numéros ou noms
-    if (normalized === '1' || normalized.toLowerCase().includes('facile')) {
-        selectedLevel = DifficultyLevels.FACILE;
-    } else if (normalized === '2' || normalized.toLowerCase().includes('moyen')) {
-        selectedLevel = DifficultyLevels.MOYEN;
-    } else if (normalized === '3' || normalized.toLowerCase().includes('difficile')) {
-        selectedLevel = DifficultyLevels.DIFFICILE;
-    } else if (normalized === '4' || normalized.toLowerCase().includes('expert')) {
-        selectedLevel = DifficultyLevels.EXPERT;
-    } else if (normalized === '5' || normalized.toLowerCase().includes('maitre') || normalized.toLowerCase().includes('maître')) {
-        selectedLevel = DifficultyLevels.MAITRE;
-    }
-    
-    if (!selectedLevel) {
-        if (!gameData.invalidResponses) gameData.invalidResponses = 0;
-        gameData.invalidResponses++;
-        
-        if (gameData.invalidResponses >= 3) {
-            chessGames.delete(senderId);
-            return `❌ Trop de réponses invalides ! Partie annulée.
-
-🆕 Tape /echecs pour recommencer ! 💕`;
-        }
-        
-        return `❌ Niveau non reconnu !
-
-Réponds avec un numéro de 1 à 5
-Tentative ${gameData.invalidResponses}/3 ♟️`;
-    }
-    
-    gameData.difficulty = selectedLevel;
-    gameData.state = GameState.AWAITING_STARTER;
-    chessGames.set(senderId, gameData);
-    
-    addToMemory(senderId, 'user', `Niveau choisi: ${selectedLevel.name}`);
-    
-    log.info(`♟️ ${senderId} a choisi le niveau ${selectedLevel.name}`);
-    
-    return `✅ Niveau ${selectedLevel.emoji} ${selectedLevel.name} !
-
 🎯 Qui commence ?
-
 👤 Réponds "moi" - Tu joues Blancs
 🤖 Réponds "toi" - Je joue Blancs
-
 Fais ton choix ! 💕`;
 }
 
@@ -273,6 +187,7 @@ async function handleStarterResponse(senderId, response, gameData, log, addToMem
     const normalized = response.toLowerCase().trim();
     
     if (normalized === 'moi' || normalized === 'me' || normalized === 'blanc' || normalized === 'blancs') {
+        // L'utilisateur joue Blancs
         gameData.userColor = 'w';
         gameData.botColor = 'b';
         gameData.state = GameState.PLAYING;
@@ -289,14 +204,13 @@ async function handleStarterResponse(senderId, response, gameData, log, addToMem
             type: "image",
             url: boardImage,
             caption: `✅ Tu joues les Blancs ! ♟️
-${gameData.difficulty.emoji} Niveau: ${gameData.difficulty.name}
-
 🎯 À toi de jouer !
 💡 Envoie ton coup (ex: e2e4, Nf3, d2d4)`
         };
     }
     
     if (normalized === 'toi' || normalized === 'bot' || normalized === 'noir' || normalized === 'noirs') {
+        // Le bot joue Blancs
         gameData.userColor = 'b';
         gameData.botColor = 'w';
         gameData.state = GameState.PLAYING;
@@ -306,6 +220,7 @@ ${gameData.difficulty.emoji} Niveau: ${gameData.difficulty.name}
         
         log.info(`♟️ ${senderId} joue Noirs - Bot commence`);
         
+        // Le bot fait son premier coup
         const botMoveResult = await makeBotMove(gameData, log);
         
         chessGames.set(senderId, gameData);
@@ -316,31 +231,29 @@ ${gameData.difficulty.emoji} Niveau: ${gameData.difficulty.name}
             type: "image",
             url: boardImage,
             caption: `✅ Je joue les Blancs ! ♟️
-${gameData.difficulty.emoji} Niveau: ${gameData.difficulty.name}
-
 🤖 Mon coup: ${botMoveResult.move}
 ${botMoveResult.annotation}
-
 🎯 À toi de jouer !
 💡 Envoie ton coup (ex: e7e5, Nf6)`
         };
     }
     
-    if (!gameData.invalidResponses) gameData.invalidResponses = 0;
+    // Réponse invalide
+    if (!gameData.invalidResponses) {
+        gameData.invalidResponses = 0;
+    }
     gameData.invalidResponses++;
     
     if (gameData.invalidResponses >= 3) {
+        // Après 3 tentatives, annuler
         chessGames.delete(senderId);
-        return `❌ Trop de réponses invalides ! Partie annulée.
-
-🆕 Tape /echecs pour recommencer ! 💕`;
+        return `❌ Trop de réponses invalides !
+Partie annulée. Tape /echecs pour recommencer ! 💕`;
     }
     
     return `❌ Réponse non comprise ! Réponds:
-
 👤 "moi" - Tu joues Blancs
 🤖 "toi" - Je joue Blancs
-
 Tentative ${gameData.invalidResponses}/3`;
 }
 
@@ -348,18 +261,24 @@ Tentative ${gameData.invalidResponses}/3`;
 async function handleUserMove(senderId, moveText, gameData, log, addToMemory, sleep, ctx) {
     const chess = gameData.chess;
     
+    // Vérifier que c'est au tour de l'utilisateur
     if (chess.turn() !== gameData.userColor) {
-        await ctx.sendImageMessage(senderId, null, `⏰ Ce n'est pas ton tour ! Attends mon coup ! ♟️`);
-        return;
+        return `⏰ Ce n'est pas ton tour !
+Attends mon coup ! ♟️`;
     }
     
+    // Nettoyer et normaliser le coup
     const cleanMove = moveText.trim().replace(/\s+/g, '');
     
     try {
+        // Tenter d'appliquer le coup (sloppy mode pour accepter différents formats)
         const move = chess.move(cleanMove, { sloppy: true });
         
-        if (!move) throw new Error('Coup invalide');
+        if (!move) {
+            throw new Error('Coup invalide');
+        }
         
+        // Coup valide !
         gameData.history.push({
             player: 'user',
             move: move.san,
@@ -369,58 +288,54 @@ async function handleUserMove(senderId, moveText, gameData, log, addToMemory, sl
         gameData.lastUpdated = new Date().toISOString();
         
         addToMemory(senderId, 'user', `Coup d'échecs: ${move.san}`);
+        
         log.info(`♟️ ${senderId} a joué: ${move.san}`);
         
-        const userBoardImage = await generateBoardImage(chess, gameData.userColor);
-        await ctx.sendImageMessage(senderId, userBoardImage, `✅ Tu as joué: ${move.san}
-
-🎯 Position après ton coup.
-${gameData.difficulty.emoji} J'analyse la position...`);
-        
+        // Vérifier si la partie est terminée après le coup de l'utilisateur
         if (chess.isGameOver()) {
-            await handleGameOver(senderId, gameData, log, addToMemory, ctx);
-            return;
+            return await handleGameOver(senderId, gameData, log, addToMemory);
         }
         
-        // Temps de réflexion basé sur le niveau
-        const thinkingTime = 1000 + (gameData.difficulty.depth * 500);
-        await sleep(thinkingTime);
-        
+        // Le bot joue maintenant
         const botMoveResult = await makeBotMove(gameData, log);
         
         chessGames.set(senderId, gameData);
+        
         addToMemory(senderId, 'assistant', `Mon coup: ${botMoveResult.move}`);
         
-        const botBoardImage = await generateBoardImage(chess, gameData.userColor);
-        await ctx.sendImageMessage(senderId, botBoardImage, `🤖 Mon coup: ${botMoveResult.move}
-${botMoveResult.annotation}
-
-🎯 À toi de jouer !`);
-        
+        // Vérifier si la partie est terminée après le coup du bot
         if (chess.isGameOver()) {
-            await handleGameOver(senderId, gameData, log, addToMemory, ctx);
-            return;
+            return await handleGameOver(senderId, gameData, log, addToMemory);
         }
+        
+        const boardImage = await generateBoardImage(chess, gameData.userColor);
+        
+        return {
+            type: "image",
+            url: boardImage,
+            caption: `✅ Tu as joué: ${move.san}
+🤖 Mon coup: ${botMoveResult.move}
+${botMoveResult.annotation}
+🎯 À toi de jouer !`
+        };
         
     } catch (error) {
         log.warning(`⚠️ ${senderId} coup invalide: ${moveText}`);
         
         const possibleMoves = chess.moves().slice(0, 10).join(', ');
         
-        await ctx.sendImageMessage(senderId, null, `❌ Coup invalide: "${moveText}"
-
+        return `❌ Coup invalide: "${moveText}"
 Format attendu:
 • e2e4 (déplacement simple)
 • Nf3 (notation algébrique)
 • O-O (roque court)
-
+• O-O-O (roque long)
 Coups possibles: ${possibleMoves}${chess.moves().length > 10 ? '...' : ''}
-
-💡 Réessaie ! ♟️`);
+💡 Réessaie ! ♟️`;
     }
 }
 
-// ✅ FONCTION: Le bot fait son coup (IA AMÉLIORÉE)
+// ✅ FONCTION: Le bot fait son coup
 async function makeBotMove(gameData, log) {
     const chess = gameData.chess;
     const possibleMoves = chess.moves();
@@ -429,21 +344,21 @@ async function makeBotMove(gameData, log) {
         return { move: 'Aucun coup possible', annotation: '' };
     }
     
-    const difficulty = gameData.difficulty;
+    // ✅ Stratégie du bot: Mélange de coups intelligents et aléatoires
     let selectedMove;
     let annotation = '';
     
-    // Ajouter de l'aléatoire selon le niveau
-    if (Math.random() < difficulty.randomness) {
+    // 30% de chance de faire un coup complètement aléatoire (pour varier)
+    if (Math.random() < 0.3) {
         selectedMove = possibleMoves[Math.floor(Math.random() * possibleMoves.length)];
         annotation = '🎲 (coup créatif)';
     } else {
-        // Utiliser Minimax avec élagage Alpha-Beta
-        const result = minimax(chess, difficulty.depth, -Infinity, Infinity, true);
-        selectedMove = result.move;
-        annotation = `🧠 (évaluation: ${result.score > 0 ? '+' : ''}${(result.score / 100).toFixed(1)})`;
+        // 70% de chance de faire un coup "intelligent"
+        selectedMove = selectBestMove(chess, possibleMoves);
+        annotation = '🧠 (coup réfléchi)';
     }
     
+    // Appliquer le coup
     const move = chess.move(selectedMove);
     
     gameData.history.push({
@@ -456,126 +371,64 @@ async function makeBotMove(gameData, log) {
     
     log.info(`🤖 Bot a joué: ${move.san}`);
     
-    return { move: move.san, annotation: annotation };
-}
-
-// ✅ FONCTION: Algorithme Minimax avec élagage Alpha-Beta
-function minimax(chess, depth, alpha, beta, isMaximizing) {
-    if (depth === 0 || chess.isGameOver()) {
-        return { score: evaluatePosition(chess), move: null };
-    }
-    
-    const moves = chess.moves();
-    let bestMove = moves[0];
-    
-    if (isMaximizing) {
-        let maxScore = -Infinity;
-        
-        for (const move of moves) {
-            chess.move(move);
-            const score = minimax(chess, depth - 1, alpha, beta, false).score;
-            chess.undo();
-            
-            if (score > maxScore) {
-                maxScore = score;
-                bestMove = move;
-            }
-            
-            alpha = Math.max(alpha, score);
-            if (beta <= alpha) break; // Élagage Beta
-        }
-        
-        return { score: maxScore, move: bestMove };
-    } else {
-        let minScore = Infinity;
-        
-        for (const move of moves) {
-            chess.move(move);
-            const score = minimax(chess, depth - 1, alpha, beta, true).score;
-            chess.undo();
-            
-            if (score < minScore) {
-                minScore = score;
-                bestMove = move;
-            }
-            
-            beta = Math.min(beta, score);
-            if (beta <= alpha) break; // Élagage Alpha
-        }
-        
-        return { score: minScore, move: bestMove };
-    }
-}
-
-// ✅ FONCTION: Évaluer une position (heuristique avancée)
-function evaluatePosition(chess) {
-    if (chess.isCheckmate()) {
-        return chess.turn() === 'w' ? -10000 : 10000;
-    }
-    
-    if (chess.isDraw()) return 0;
-    
-    let score = 0;
-    
-    // Valeurs des pièces
-    const pieceValues = {
-        p: 100, n: 320, b: 330, r: 500, q: 900, k: 20000
+    return {
+        move: move.san,
+        annotation: annotation
     };
+}
+
+// ✅ FONCTION: Sélectionner le "meilleur" coup (heuristique simple)
+function selectBestMove(chess, moves) {
+    // Heuristique simple sans moteur Stockfish
+    // Priorités: 1. Échec et mat 2. Captures 3. Contrôle du centre 4. Développement
     
-    // Tables de position pour encourager le bon placement
-    const pawnTable = [
-        0,  0,  0,  0,  0,  0,  0,  0,
-        50, 50, 50, 50, 50, 50, 50, 50,
-        10, 10, 20, 30, 30, 20, 10, 10,
-        5,  5, 10, 25, 25, 10,  5,  5,
-        0,  0,  0, 20, 20,  0,  0,  0,
-        5, -5,-10,  0,  0,-10, -5,  5,
-        5, 10, 10,-20,-20, 10, 10,  5,
-        0,  0,  0,  0,  0,  0,  0,  0
-    ];
-    
-    const knightTable = [
-        -50,-40,-30,-30,-30,-30,-40,-50,
-        -40,-20,  0,  0,  0,  0,-20,-40,
-        -30,  0, 10, 15, 15, 10,  0,-30,
-        -30,  5, 15, 20, 20, 15,  5,-30,
-        -30,  0, 15, 20, 20, 15,  0,-30,
-        -30,  5, 10, 15, 15, 10,  5,-30,
-        -40,-20,  0,  5,  5,  0,-20,-40,
-        -50,-40,-30,-30,-30,-30,-40,-50
-    ];
-    
-    const board = chess.board();
-    
-    for (let i = 0; i < 8; i++) {
-        for (let j = 0; j < 8; j++) {
-            const piece = board[i][j];
-            if (piece) {
-                const value = pieceValues[piece.type];
-                const position = i * 8 + j;
-                const positionBonus = piece.type === 'p' ? pawnTable[position] : 
-                                     piece.type === 'n' ? knightTable[position] : 0;
-                
-                if (piece.color === 'w') {
-                    score += value + positionBonus;
-                } else {
-                    score -= value + positionBonus;
-                }
-            }
+    let scoredMoves = moves.map(move => {
+        const moveObj = chess.move(move);
+        let score = 0;
+        
+        // Échec et mat = priorité absolue
+        if (chess.isCheckmate()) {
+            score += 10000;
         }
-    }
+        
+        // Échec
+        if (chess.inCheck()) {
+            score += 50;
+        }
+        
+        // Capture
+        if (moveObj.captured) {
+            const pieceValues = { p: 1, n: 3, b: 3, r: 5, q: 9, k: 0 };
+            score += pieceValues[moveObj.captured] * 10;
+        }
+        
+        // Contrôle du centre (e4, e5, d4, d5)
+        const centerSquares = ['e4', 'e5', 'd4', 'd5'];
+        if (centerSquares.includes(moveObj.to)) {
+            score += 5;
+        }
+        
+        // Développement des pièces (sortir les cavaliers et fous)
+        if (['n', 'b'].includes(moveObj.piece) && ['1', '8'].includes(moveObj.from[1])) {
+            score += 3;
+        }
+        
+        chess.undo();
+        return { move, score };
+    });
     
-    // Bonus mobilité
-    const whiteMoves = chess.turn() === 'w' ? chess.moves().length : 0;
-    chess.load(chess.fen().replace('w', 'b').replace('b', 'w', 1));
-    const blackMoves = chess.moves().length;
-    score += (whiteMoves - blackMoves) * 10;
+    // Trier par score décroissant
+    scoredMoves.sort((a, b) => b.score - a.score);
     
-    return score;
+    // Prendre l'un des 3 meilleurs coups pour ajouter de la variété
+    const topMoves = scoredMoves.slice(0, Math.min(3, scoredMoves.length));
+    const selectedMove = topMoves[Math.floor(Math.random() * topMoves.length)];
+    
+    return selectedMove.move;
 }
 
 // ✅ FONCTION: Gérer la fin de partie
-async function handleGameOver(senderId, gameData, log, addToMemory, ctx) {
+async function handleGameOver(senderId, gameData, log, addToMemory) {
     const chess = gameData.chess;
     gameData.state = GameState.FINISHED;
     
@@ -591,36 +444,32 @@ async function handleGameOver(senderId, gameData, log, addToMemory, ctx) {
         
         if (userWon) {
             message = `🎉 ÉCHEC ET MAT ! Tu as gagné ! 👑
-
 Résultat: ${result}
-Niveau: ${gameData.difficulty.emoji} ${gameData.difficulty.name}
 Coups joués: ${gameData.history.length}
-
 Bravo champion ! 🏆💕`;
         } else {
             message = `🤖 ÉCHEC ET MAT ! J'ai gagné ! ♟️
-
 Résultat: ${result}
-Niveau: ${gameData.difficulty.emoji} ${gameData.difficulty.name}
 Coups joués: ${gameData.history.length}
-
 Bien joué ! Revanche ? 💕`;
         }
     } else if (chess.isDraw()) {
         result = '1/2-1/2';
         let drawReason = '';
         
-        if (chess.isStalemate()) drawReason = 'Pat (aucun coup légal)';
-        else if (chess.isThreefoldRepetition()) drawReason = 'Triple répétition';
-        else if (chess.isInsufficientMaterial()) drawReason = 'Matériel insuffisant';
-        else drawReason = 'Règle des 50 coups';
+        if (chess.isStalemate()) {
+            drawReason = 'Pat (aucun coup légal)';
+        } else if (chess.isThreefoldRepetition()) {
+            drawReason = 'Triple répétition';
+        } else if (chess.isInsufficientMaterial()) {
+            drawReason = 'Matériel insuffisant';
+        } else {
+            drawReason = 'Règle des 50 coups';
+        }
         
         message = `🤝 MATCH NUL ! ${drawReason}
-
 Résultat: ${result}
-Niveau: ${gameData.difficulty.emoji} ${gameData.difficulty.name}
 Coups joués: ${gameData.history.length}
-
 Belle partie ! Revanche ? ♟️💕`;
     }
     
@@ -632,7 +481,11 @@ Belle partie ! Revanche ? ♟️💕`;
     
     const boardImage = await generateBoardImage(chess, gameData.userColor);
     
-    await ctx.sendImageMessage(senderId, boardImage, message + '\n\n🆕 Tape /echecs nouvelle pour rejouer !');
+    return {
+        type: "image",
+        url: boardImage,
+        caption: message + '\n\n🆕 Tape /echecs nouvelle pour rejouer !'
+    };
 }
 
 // ✅ FONCTION: Obtenir le statut de la partie
@@ -644,14 +497,12 @@ async function getGameStatus(gameData) {
     const isUserTurn = chess.turn() === gameData.userColor;
     
     let caption = `📊 État de la partie ♟️
-
-${gameData.difficulty.emoji} Niveau: ${gameData.difficulty.name}
 👤 Tu joues: ${userColorName}
 🎯 Tour: ${currentTurn} ${isUserTurn ? '(À toi !)' : '(À moi !)'}
 📈 Coups: ${moveCount}
-
 `;
     
+    // Afficher les derniers coups
     if (gameData.history.length > 0) {
         caption += '📜 Derniers coups:\n';
         const recentMoves = gameData.history.slice(-6);
@@ -661,29 +512,47 @@ ${gameData.difficulty.emoji} Niveau: ${gameData.difficulty.name}
         });
     }
     
-    if (chess.inCheck()) caption += '\n⚠️ ÉCHEC !';
+    if (chess.inCheck()) {
+        caption += '\n⚠️ ÉCHEC !';
+    }
     
-    caption += `\n\n💡 ${isUserTurn ? 'Envoie ton coup !' : 'J\'analyse...'}`;
+    caption += `\n\n💡 ${isUserTurn ? 'Envoie ton coup !' : 'J\'y réfléchis...'}`;
     
     const boardImage = await generateBoardImage(chess, gameData.userColor);
     
-    return { type: "image", url: boardImage, caption: caption };
+    return {
+        type: "image",
+        url: boardImage,
+        caption: caption
+    };
 }
 
-// ✅ FONCTION: Générer une image du plateau
+// ✅ FONCTION: Générer une image du plateau d'échecs
 async function generateBoardImage(chess, userColor) {
+    // Obtenir le FEN (Forsyth-Edwards Notation) pour représenter la position
     const fen = chess.fen();
+    
+    // Déterminer l'orientation
     const orientation = userColor === 'w' ? 'white' : 'black';
     const encodedFen = encodeURIComponent(fen);
     
-    const theme = 'brown';
-    const pieceSet = 'cburnett';
+    // ✅ Option 1: Lichess.org (SANS LOGO, gratuit, très fiable)
+    const theme = 'brown'; // Thèmes: blue, brown, green, purple, ic
+    const pieceSet = 'cburnett'; // Sets: alpha, cburnett, chess7, merida, spatial
+    // Taille augmentée pour meilleure visibilité (max recommandé: 1024)
     const imageUrl = `https://lichess1.org/export/fen.gif?fen=${encodedFen}&theme=${theme}&piece=${pieceSet}&orientation=${orientation}&size=1024`;
+    
+    // Option 2 (backup): Backscattering.de
+    // const imageUrl = `https://backscattering.de/web-boardimage/board.svg?fen=${encodedFen}&orientation=${orientation}&size=400`;
+    
+    // Option 3 (backup 2): Chess Vision AI (avec logo)
+    // const flip = userColor === 'b' ? 'true' : 'false';
+    // const imageUrl = `https://fen2image.chessvision.ai/${encodedFen}?flip=${flip}&size=600`;
     
     return imageUrl;
 }
 
-// ✅ Nettoyage automatique des parties anciennes
+// ✅ Nettoyage automatique des parties anciennes (plus de 7 jours)
 setInterval(() => {
     const now = Date.now();
     const sevenDays = 7 * 24 * 60 * 60 * 1000;
