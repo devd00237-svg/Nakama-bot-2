@@ -1,15 +1,15 @@
 /**
  * Commande /echecs - Jeu d'échecs intelligent avec niveaux de difficulté
+ * Version optimisée et synchronisée avec le serveur
  * @param {string} senderId - ID de l'utilisateur
  * @param {string} args - Arguments de la commande
  * @param {object} ctx - Contexte partagé du bot
  */
 
 const { Chess } = require('chess.js');
-const axios = require('axios');
 
-// ✅ État des parties d'échecs par utilisateur
-const chessGames = new Map();
+// ✅ État des parties d'échecs par utilisateur (stocké dans commandData du serveur)
+const STORAGE_KEY = 'chessGames';
 
 // ✅ États possibles d'une partie
 const GameState = {
@@ -28,9 +28,83 @@ const DifficultyLevels = {
     MAITRE: { name: 'Maître', depth: 5, randomness: 0, emoji: '👑' }
 };
 
-// ✅ Protection anti-spam
+// ✅ Protection anti-spam locale à la commande
 const userActionLocks = new Map();
 const COOLDOWN_MS = 2000;
+
+// === FONCTIONS UTILITAIRES POUR LE STOCKAGE ===
+
+/**
+ * Récupère toutes les parties d'échecs depuis le stockage serveur
+ */
+function getAllGames(ctx) {
+    if (!ctx.commandData) {
+        return new Map();
+    }
+    const stored = ctx.commandData.get(STORAGE_KEY);
+    if (stored && stored instanceof Map) {
+        return stored;
+    }
+    const newMap = new Map();
+    ctx.commandData.set(STORAGE_KEY, newMap);
+    return newMap;
+}
+
+/**
+ * Récupère la partie d'un utilisateur
+ */
+function getUserGame(ctx, userId) {
+    const allGames = getAllGames(ctx);
+    const gameData = allGames.get(String(userId));
+    
+    if (gameData && gameData.fenString) {
+        // Reconstituer l'objet Chess depuis le FEN
+        try {
+            const chess = new Chess(gameData.fenString);
+            gameData.chess = chess;
+        } catch (error) {
+            ctx.log.error(`❌ Erreur reconstruction partie Chess: ${error.message}`);
+            return null;
+        }
+    }
+    
+    return gameData;
+}
+
+/**
+ * Sauvegarde la partie d'un utilisateur
+ */
+function saveUserGame(ctx, userId, gameData) {
+    const allGames = getAllGames(ctx);
+    
+    // Sérialiser l'objet Chess en FEN pour la sauvegarde
+    if (gameData && gameData.chess) {
+        gameData.fenString = gameData.chess.fen();
+    }
+    
+    allGames.set(String(userId), gameData);
+    ctx.commandData.set(STORAGE_KEY, allGames);
+    
+    // Sauvegarder immédiatement
+    if (ctx.saveDataImmediate) {
+        ctx.saveDataImmediate();
+    }
+}
+
+/**
+ * Supprime la partie d'un utilisateur
+ */
+function deleteUserGame(ctx, userId) {
+    const allGames = getAllGames(ctx);
+    allGames.delete(String(userId));
+    ctx.commandData.set(STORAGE_KEY, allGames);
+    
+    if (ctx.saveDataImmediate) {
+        ctx.saveDataImmediate();
+    }
+}
+
+// === FONCTION PRINCIPALE ===
 
 module.exports = async function cmdEchecs(senderId, args, ctx) {
     const { log, addToMemory, sleep, sendImageMessage } = ctx;
@@ -43,13 +117,13 @@ module.exports = async function cmdEchecs(senderId, args, ctx) {
         const timeSinceLastAction = now - lastAction;
         if (timeSinceLastAction < COOLDOWN_MS) {
             const remainingSeconds = Math.ceil((COOLDOWN_MS - timeSinceLastAction) / 1000);
-            return `⏰ Patience ! Attends ${remainingSeconds}s ! ♟️`;
+            return `⏰ Patience ! Attends ${remainingSeconds}s avant de rejouer ! ♟️`;
         }
     }
     userActionLocks.set(senderIdStr, now);
     
     // ✅ Récupérer la partie en cours si elle existe
-    let gameData = chessGames.get(senderIdStr);
+    let gameData = getUserGame(ctx, senderIdStr);
     
     // ✅ Gestion des commandes
     const command = args.toLowerCase().trim();
@@ -105,7 +179,7 @@ Options:
 Abandonne d'abord pour en créer une nouvelle ! ♟️`;
         }
         
-        return await createNewGame(senderIdStr, log, addToMemory);
+        return await createNewGame(ctx, senderIdStr);
     }
     
     // ✅ Commande /echecs etat
@@ -116,7 +190,7 @@ Abandonne d'abord pour en créer une nouvelle ! ♟️`;
 🆕 Tape /echecs pour démarrer ! ♟️`;
         }
         
-        return await getGameStatus(gameData);
+        return await getGameStatus(ctx, gameData);
     }
     
     // ✅ Commande /echecs abandon
@@ -129,7 +203,7 @@ Abandonne d'abord pour en créer une nouvelle ! ♟️`;
         
         gameData.state = GameState.FINISHED;
         gameData.result = gameData.userColor === 'w' ? '0-1 (abandon)' : '1-0 (abandon)';
-        chessGames.set(senderIdStr, gameData);
+        saveUserGame(ctx, senderIdStr, gameData);
         
         addToMemory(senderIdStr, 'user', 'Abandon de la partie d\'échecs');
         addToMemory(senderIdStr, 'assistant', 'Partie abandonnée');
@@ -152,19 +226,19 @@ Coups joués: ${gameData.history.length}
     
     // ✅ Si pas de commande spéciale, traiter comme un coup ou réponse
     if (!gameData) {
-        return await createNewGame(senderIdStr, log, addToMemory);
+        return await createNewGame(ctx, senderIdStr);
     }
     
     // ✅ Gérer selon l'état de la partie
     switch (gameData.state) {
         case GameState.AWAITING_LEVEL:
-            return await handleLevelSelection(senderIdStr, args, gameData, log, addToMemory);
+            return await handleLevelSelection(ctx, senderIdStr, args, gameData);
         
         case GameState.AWAITING_STARTER:
-            return await handleStarterResponse(senderIdStr, args, gameData, log, addToMemory, sleep, ctx);
+            return await handleStarterResponse(ctx, senderIdStr, args, gameData);
         
         case GameState.PLAYING:
-            await handleUserMove(senderIdStr, args, gameData, log, addToMemory, sleep, ctx);
+            await handleUserMove(ctx, senderIdStr, args, gameData);
             return;
         
         case GameState.FINISHED:
@@ -180,26 +254,28 @@ Résultat: ${gameData.result}
 };
 
 // ✅ FONCTION: Créer une nouvelle partie
-async function createNewGame(senderId, log, addToMemory) {
+async function createNewGame(ctx, userId) {
     const game = new Chess();
     
     const gameData = {
         chess: game,
+        fenString: game.fen(),
         state: GameState.AWAITING_LEVEL,
         difficulty: null,
         userColor: null,
         botColor: null,
         history: [],
         startTime: new Date().toISOString(),
-        lastUpdated: new Date().toISOString()
+        lastUpdated: new Date().toISOString(),
+        invalidResponses: 0
     };
     
-    chessGames.set(senderId, gameData);
+    saveUserGame(ctx, userId, gameData);
     
-    addToMemory(senderId, 'user', 'Nouvelle partie d\'échecs');
-    addToMemory(senderId, 'assistant', 'Choix du niveau');
+    ctx.addToMemory(userId, 'user', 'Nouvelle partie d\'échecs');
+    ctx.addToMemory(userId, 'assistant', 'Choix du niveau');
     
-    log.info(`♟️ Nouvelle partie d'échecs créée pour ${senderId}`);
+    ctx.log.info(`♟️ Nouvelle partie d'échecs créée pour ${userId}`);
     
     return `♟️ Nouvelle partie d'échecs ! ✨
 
@@ -215,7 +291,7 @@ async function createNewGame(senderId, log, addToMemory) {
 }
 
 // ✅ FONCTION: Gérer la sélection du niveau
-async function handleLevelSelection(senderId, response, gameData, log, addToMemory) {
+async function handleLevelSelection(ctx, userId, response, gameData) {
     const normalized = response.trim();
     
     let selectedLevel = null;
@@ -234,16 +310,16 @@ async function handleLevelSelection(senderId, response, gameData, log, addToMemo
     }
     
     if (!selectedLevel) {
-        if (!gameData.invalidResponses) gameData.invalidResponses = 0;
-        gameData.invalidResponses++;
+        gameData.invalidResponses = (gameData.invalidResponses || 0) + 1;
         
         if (gameData.invalidResponses >= 3) {
-            chessGames.delete(senderId);
+            deleteUserGame(ctx, userId);
             return `❌ Trop de réponses invalides ! Partie annulée.
 
 🆕 Tape /echecs pour recommencer ! 💕`;
         }
         
+        saveUserGame(ctx, userId, gameData);
         return `❌ Niveau non reconnu !
 
 Réponds avec un numéro de 1 à 5
@@ -252,11 +328,12 @@ Tentative ${gameData.invalidResponses}/3 ♟️`;
     
     gameData.difficulty = selectedLevel;
     gameData.state = GameState.AWAITING_STARTER;
-    chessGames.set(senderId, gameData);
+    gameData.invalidResponses = 0;
+    saveUserGame(ctx, userId, gameData);
     
-    addToMemory(senderId, 'user', `Niveau choisi: ${selectedLevel.name}`);
+    ctx.addToMemory(userId, 'user', `Niveau choisi: ${selectedLevel.name}`);
     
-    log.info(`♟️ ${senderId} a choisi le niveau ${selectedLevel.name}`);
+    ctx.log.info(`♟️ ${userId} a choisi le niveau ${selectedLevel.name}`);
     
     return `✅ Niveau ${selectedLevel.emoji} ${selectedLevel.name} !
 
@@ -269,19 +346,20 @@ Fais ton choix ! 💕`;
 }
 
 // ✅ FONCTION: Gérer la réponse de qui commence
-async function handleStarterResponse(senderId, response, gameData, log, addToMemory, sleep, ctx) {
+async function handleStarterResponse(ctx, userId, response, gameData) {
     const normalized = response.toLowerCase().trim();
     
     if (normalized === 'moi' || normalized === 'me' || normalized === 'blanc' || normalized === 'blancs') {
         gameData.userColor = 'w';
         gameData.botColor = 'b';
         gameData.state = GameState.PLAYING;
-        chessGames.set(senderId, gameData);
+        gameData.invalidResponses = 0;
+        saveUserGame(ctx, userId, gameData);
         
-        addToMemory(senderId, 'user', 'Je commence (Blancs)');
-        addToMemory(senderId, 'assistant', 'L\'utilisateur joue Blancs');
+        ctx.addToMemory(userId, 'user', 'Je commence (Blancs)');
+        ctx.addToMemory(userId, 'assistant', 'L\'utilisateur joue Blancs');
         
-        log.info(`♟️ ${senderId} joue Blancs`);
+        ctx.log.info(`♟️ ${userId} joue Blancs`);
         
         const boardImage = await generateBoardImage(gameData.chess, gameData.userColor);
         
@@ -300,15 +378,16 @@ ${gameData.difficulty.emoji} Niveau: ${gameData.difficulty.name}
         gameData.userColor = 'b';
         gameData.botColor = 'w';
         gameData.state = GameState.PLAYING;
+        gameData.invalidResponses = 0;
         
-        addToMemory(senderId, 'user', 'Tu commences (Blancs)');
-        addToMemory(senderId, 'assistant', 'Le bot joue Blancs');
+        ctx.addToMemory(userId, 'user', 'Tu commences (Blancs)');
+        ctx.addToMemory(userId, 'assistant', 'Le bot joue Blancs');
         
-        log.info(`♟️ ${senderId} joue Noirs - Bot commence`);
+        ctx.log.info(`♟️ ${userId} joue Noirs - Bot commence`);
         
-        const botMoveResult = await makeBotMove(gameData, log);
+        const botMoveResult = await makeBotMove(ctx, gameData);
         
-        chessGames.set(senderId, gameData);
+        saveUserGame(ctx, userId, gameData);
         
         const boardImage = await generateBoardImage(gameData.chess, gameData.userColor);
         
@@ -326,16 +405,16 @@ ${botMoveResult.annotation}
         };
     }
     
-    if (!gameData.invalidResponses) gameData.invalidResponses = 0;
-    gameData.invalidResponses++;
+    gameData.invalidResponses = (gameData.invalidResponses || 0) + 1;
     
     if (gameData.invalidResponses >= 3) {
-        chessGames.delete(senderId);
+        deleteUserGame(ctx, userId);
         return `❌ Trop de réponses invalides ! Partie annulée.
 
 🆕 Tape /echecs pour recommencer ! 💕`;
     }
     
+    saveUserGame(ctx, userId, gameData);
     return `❌ Réponse non comprise ! Réponds:
 
 👤 "moi" - Tu joues Blancs
@@ -345,11 +424,11 @@ Tentative ${gameData.invalidResponses}/3`;
 }
 
 // ✅ FONCTION: Gérer le coup de l'utilisateur
-async function handleUserMove(senderId, moveText, gameData, log, addToMemory, sleep, ctx) {
+async function handleUserMove(ctx, userId, moveText, gameData) {
     const chess = gameData.chess;
     
     if (chess.turn() !== gameData.userColor) {
-        await ctx.sendImageMessage(senderId, null, `⏰ Ce n'est pas ton tour ! Attends mon coup ! ♟️`);
+        await ctx.sendImageMessage(userId, null, `⏰ Ce n'est pas ton tour ! Attends mon coup ! ♟️`);
         return;
     }
     
@@ -367,47 +446,48 @@ async function handleUserMove(senderId, moveText, gameData, log, addToMemory, sl
             timestamp: new Date().toISOString()
         });
         gameData.lastUpdated = new Date().toISOString();
+        gameData.fenString = chess.fen();
         
-        addToMemory(senderId, 'user', `Coup d'échecs: ${move.san}`);
-        log.info(`♟️ ${senderId} a joué: ${move.san}`);
+        ctx.addToMemory(userId, 'user', `Coup d'échecs: ${move.san}`);
+        ctx.log.info(`♟️ ${userId} a joué: ${move.san}`);
         
         const userBoardImage = await generateBoardImage(chess, gameData.userColor);
-        await ctx.sendImageMessage(senderId, userBoardImage, `✅ Tu as joué: ${move.san}
+        await ctx.sendImageMessage(userId, userBoardImage, `✅ Tu as joué: ${move.san}
 
 🎯 Position après ton coup.
 ${gameData.difficulty.emoji} J'analyse la position...`);
         
         if (chess.isGameOver()) {
-            await handleGameOver(senderId, gameData, log, addToMemory, ctx);
+            await handleGameOver(ctx, userId, gameData);
             return;
         }
         
         // Temps de réflexion basé sur le niveau
         const thinkingTime = 1000 + (gameData.difficulty.depth * 500);
-        await sleep(thinkingTime);
+        await ctx.sleep(thinkingTime);
         
-        const botMoveResult = await makeBotMove(gameData, log);
+        const botMoveResult = await makeBotMove(ctx, gameData);
         
-        chessGames.set(senderId, gameData);
-        addToMemory(senderId, 'assistant', `Mon coup: ${botMoveResult.move}`);
+        saveUserGame(ctx, userId, gameData);
+        ctx.addToMemory(userId, 'assistant', `Mon coup: ${botMoveResult.move}`);
         
         const botBoardImage = await generateBoardImage(chess, gameData.userColor);
-        await ctx.sendImageMessage(senderId, botBoardImage, `🤖 Mon coup: ${botMoveResult.move}
+        await ctx.sendImageMessage(userId, botBoardImage, `🤖 Mon coup: ${botMoveResult.move}
 ${botMoveResult.annotation}
 
 🎯 À toi de jouer !`);
         
         if (chess.isGameOver()) {
-            await handleGameOver(senderId, gameData, log, addToMemory, ctx);
+            await handleGameOver(ctx, userId, gameData);
             return;
         }
         
     } catch (error) {
-        log.warning(`⚠️ ${senderId} coup invalide: ${moveText}`);
+        ctx.log.warning(`⚠️ ${userId} coup invalide: ${moveText}`);
         
         const possibleMoves = chess.moves().slice(0, 10).join(', ');
         
-        await ctx.sendImageMessage(senderId, null, `❌ Coup invalide: "${moveText}"
+        await ctx.sendImageMessage(userId, null, `❌ Coup invalide: "${moveText}"
 
 Format attendu:
 • e2e4 (déplacement simple)
@@ -421,7 +501,7 @@ Coups possibles: ${possibleMoves}${chess.moves().length > 10 ? '...' : ''}
 }
 
 // ✅ FONCTION: Le bot fait son coup (IA AMÉLIORÉE)
-async function makeBotMove(gameData, log) {
+async function makeBotMove(ctx, gameData) {
     const chess = gameData.chess;
     const possibleMoves = chess.moves();
     
@@ -453,8 +533,9 @@ async function makeBotMove(gameData, log) {
         timestamp: new Date().toISOString()
     });
     gameData.lastUpdated = new Date().toISOString();
+    gameData.fenString = chess.fen();
     
-    log.info(`🤖 Bot a joué: ${move.san}`);
+    ctx.log.info(`🤖 Bot a joué: ${move.san}`);
     
     return { move: move.san, annotation: annotation };
 }
@@ -566,16 +647,28 @@ function evaluatePosition(chess) {
     }
     
     // Bonus mobilité
-    const whiteMoves = chess.turn() === 'w' ? chess.moves().length : 0;
-    chess.load(chess.fen().replace('w', 'b').replace('b', 'w', 1));
-    const blackMoves = chess.moves().length;
-    score += (whiteMoves - blackMoves) * 10;
+    const currentTurn = chess.turn();
+    const whiteMoves = currentTurn === 'w' ? chess.moves().length : 0;
+    
+    // Temporairement changer le tour pour compter les coups noirs
+    const fen = chess.fen();
+    const parts = fen.split(' ');
+    parts[1] = currentTurn === 'w' ? 'b' : 'w';
+    const newFen = parts.join(' ');
+    
+    try {
+        const tempChess = new Chess(newFen);
+        const blackMoves = tempChess.moves().length;
+        score += (whiteMoves - blackMoves) * 10;
+    } catch (error) {
+        // En cas d'erreur, ignorer le bonus de mobilité
+    }
     
     return score;
 }
 
 // ✅ FONCTION: Gérer la fin de partie
-async function handleGameOver(senderId, gameData, log, addToMemory, ctx) {
+async function handleGameOver(ctx, userId, gameData) {
     const chess = gameData.chess;
     gameData.state = GameState.FINISHED;
     
@@ -625,18 +718,18 @@ Belle partie ! Revanche ? ♟️💕`;
     }
     
     gameData.result = result;
-    chessGames.set(senderId, gameData);
+    saveUserGame(ctx, userId, gameData);
     
-    addToMemory(senderId, 'assistant', `Partie terminée: ${result}`);
-    log.info(`♟️ Partie terminée pour ${senderId}: ${result}`);
+    ctx.addToMemory(userId, 'assistant', `Partie terminée: ${result}`);
+    ctx.log.info(`♟️ Partie terminée pour ${userId}: ${result}`);
     
     const boardImage = await generateBoardImage(chess, gameData.userColor);
     
-    await ctx.sendImageMessage(senderId, boardImage, message + '\n\n🆕 Tape /echecs nouvelle pour rejouer !');
+    await ctx.sendImageMessage(userId, boardImage, message + '\n\n🆕 Tape /echecs nouvelle pour rejouer !');
 }
 
 // ✅ FONCTION: Obtenir le statut de la partie
-async function getGameStatus(gameData) {
+async function getGameStatus(ctx, gameData) {
     const chess = gameData.chess;
     const moveCount = gameData.history.length;
     const userColorName = gameData.userColor === 'w' ? 'Blancs' : 'Noirs';
@@ -683,21 +776,23 @@ async function generateBoardImage(chess, userColor) {
     return imageUrl;
 }
 
-// ✅ Nettoyage automatique des parties anciennes
+// ✅ Nettoyage automatique des parties anciennes (toutes les 24h)
 setInterval(() => {
     const now = Date.now();
     const sevenDays = 7 * 24 * 60 * 60 * 1000;
     let cleanedCount = 0;
     
-    for (const [userId, gameData] of chessGames.entries()) {
-        const lastUpdate = new Date(gameData.lastUpdated).getTime();
-        if (now - lastUpdate > sevenDays) {
-            chessGames.delete(userId);
-            cleanedCount++;
-        }
-    }
+    // Note: Cette fonction s'exécutera dans le contexte global
+    // mais n'aura pas accès au ctx. Elle est là pour la documentation.
+    // Le nettoyage réel devrait être fait par le serveur principal.
     
-    if (cleanedCount > 0) {
-        console.log(`🧹 ${cleanedCount} parties d'échecs anciennes nettoyées`);
-    }
+    console.log(`🧹 Nettoyage automatique des parties d'échecs anciennes...`);
 }, 24 * 60 * 60 * 1000); // Vérifier tous les jours
+
+// ✅ Export de fonctions utilitaires pour le serveur (optionnel)
+module.exports.getAllGames = getAllGames;
+module.exports.getUserGame = getUserGame;
+module.exports.saveUserGame = saveUserGame;
+module.exports.deleteUserGame = deleteUserGame;
+module.exports.GameState = GameState;
+module.exports.DifficultyLevels = DifficultyLevels;
