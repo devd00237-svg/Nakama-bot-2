@@ -144,8 +144,7 @@ Coups joués: ${gameData.history.length}
             return await handleStarterResponse(senderIdStr, args, gameData, log, addToMemory, sleep, ctx);
         
         case GameState.PLAYING:
-            await handleUserMove(senderIdStr, args, gameData, log, addToMemory, sleep, ctx);
-            return; // Pas de retour principal car les messages sont envoyés directement
+            return await handleUserMove(senderIdStr, args, gameData, log, addToMemory, sleep, ctx);
         
         case GameState.FINISHED:
             return `✅ Cette partie est terminée !
@@ -277,10 +276,9 @@ async function handleUserMove(senderId, moveText, gameData, log, addToMemory, sl
     
     // Vérifier que c'est au tour de l'utilisateur
     if (chess.turn() !== gameData.userColor) {
-        await ctx.sendImageMessage(senderId, null, `⏰ Ce n'est pas ton tour !
+        return `⏰ Ce n'est pas ton tour !
 
-Attends mon coup ! ♟️`);
-        return;
+Attends mon coup ! ♟️`;
     }
     
     // Nettoyer et normaliser le coup
@@ -307,21 +305,10 @@ Attends mon coup ! ♟️`);
         
         log.info(`♟️ ${senderId} a joué: ${move.san}`);
         
-        // Envoyer l'image après le coup de l'utilisateur
-        const userBoardImage = await generateBoardImage(chess, gameData.userColor);
-        await ctx.sendImageMessage(senderId, userBoardImage, `✅ Tu as joué: ${move.san}
-
-🎯 Position après ton coup.
-Attends, je réfléchis à mon coup...`);
-        
         // Vérifier si la partie est terminée après le coup de l'utilisateur
         if (chess.isGameOver()) {
-            await handleGameOver(senderId, gameData, log, addToMemory, ctx);
-            return;
+            return await handleGameOver(senderId, gameData, log, addToMemory);
         }
-        
-        // Attendre un peu pour simuler la réflexion
-        await sleep(1500); // 1.5 secondes pour "réfléchir"
         
         // Le bot joue maintenant
         const botMoveResult = await makeBotMove(gameData, log);
@@ -330,25 +317,30 @@ Attends, je réfléchis à mon coup...`);
         
         addToMemory(senderId, 'assistant', `Mon coup: ${botMoveResult.move}`);
         
-        // Envoyer l'image après le coup du bot
-        const botBoardImage = await generateBoardImage(chess, gameData.userColor);
-        await ctx.sendImageMessage(senderId, botBoardImage, `🤖 Mon coup: ${botMoveResult.move}
-${botMoveResult.annotation}
-
-🎯 À toi de jouer !`);
-        
         // Vérifier si la partie est terminée après le coup du bot
         if (chess.isGameOver()) {
-            await handleGameOver(senderId, gameData, log, addToMemory, ctx);
-            return;
+            return await handleGameOver(senderId, gameData, log, addToMemory);
         }
+        
+        const boardImage = await generateBoardImage(chess, gameData.userColor);
+        
+        return {
+            type: "image",
+            url: boardImage,
+            caption: `✅ Tu as joué: ${move.san}
+
+🤖 Mon coup: ${botMoveResult.move}
+${botMoveResult.annotation}
+
+🎯 À toi de jouer !`
+        };
         
     } catch (error) {
         log.warning(`⚠️ ${senderId} coup invalide: ${moveText}`);
         
         const possibleMoves = chess.moves().slice(0, 10).join(', ');
         
-        await ctx.sendImageMessage(senderId, null, `❌ Coup invalide: "${moveText}"
+        return `❌ Coup invalide: "${moveText}"
 
 Format attendu:
 • e2e4 (déplacement simple)
@@ -358,7 +350,7 @@ Format attendu:
 
 Coups possibles: ${possibleMoves}${chess.moves().length > 10 ? '...' : ''}
 
-💡 Réessaie ! ♟️`);
+💡 Réessaie ! ♟️`;
     }
 }
 
@@ -455,7 +447,7 @@ function selectBestMove(chess, moves) {
 }
 
 // ✅ FONCTION: Gérer la fin de partie
-async function handleGameOver(senderId, gameData, log, addToMemory, ctx) {
+async function handleGameOver(senderId, gameData, log, addToMemory) {
     const chess = gameData.chess;
     gameData.state = GameState.FINISHED;
     
@@ -514,7 +506,11 @@ Belle partie ! Revanche ? ♟️💕`;
     
     const boardImage = await generateBoardImage(chess, gameData.userColor);
     
-    await ctx.sendImageMessage(senderId, boardImage, message + '\n\n🆕 Tape /echecs nouvelle pour rejouer !');
+    return {
+        type: "image",
+        url: boardImage,
+        caption: message + '\n\n🆕 Tape /echecs nouvelle pour rejouer !'
+    };
 }
 
 // ✅ FONCTION: Obtenir le statut de la partie
