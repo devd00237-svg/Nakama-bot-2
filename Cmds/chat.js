@@ -1,9 +1,14 @@
 /**
  * NakamaBot - Commande /chat UNIFIÉE avec Gemini + Mistral
- * + Détection commandes 100% IA (Gemini ET Mistral)
- * + Recherche contextuelle (Gemini ET Mistral)
- * + Support Markdown vers Unicode
+ * + Détection commandes 100% IA (Gemini ET Mistral) avec seuil assoupli pour /image
+ * + Recherche contextuelle gratuite multi-sources (DuckDuckGo, Wikipedia, Scraping)
+ * + Support Markdown vers Unicode stylisé
+ * + Support pour expressions mathématiques basiques en Unicode
  * + Optimisation: skip Gemini si toutes les clés sont mortes
+ * + Exécution automatique des commandes détectées (chargement direct des modules)
+ * + Protection anti-doublons, délai 5s, troncature synchronisée
+ * + Logs détaillés pour détection et exécution
+ * + Fix: Strip slash from command name in AI detection
  * @param {string} senderId - ID de l'utilisateur
  * @param {string} args - Message de conversation
  * @param {object} ctx - Contexte partagé du bot 
@@ -12,6 +17,8 @@
 const { GoogleGenerativeAI } = require("@google/generative-ai");
 const axios = require("axios");
 const cheerio = require("cheerio");
+const path = require('path');
+const fs = require('fs');
 
 // ========================================
 // 🔑 CONFIGURATION APIs
@@ -86,6 +93,56 @@ function toStrikethrough(str) {
     return str.split('').map(char => char + '\u0336').join('');
 }
 
+// 🆕 Support pour expressions mathématiques basiques en Unicode
+function parseLatexMath(content) {
+    if (!content) return content;
+
+    const superscripts = {
+        '0': '⁰', '1': '¹', '2': '²', '3': '³', '4': '⁴', '5': '⁵', '6': '⁶', '7': '⁷', '8': '⁸', '9': '⁹',
+        'a': 'ᵃ', 'b': 'ᵇ', 'c': 'ᶜ', 'd': 'ᵈ', 'e': 'ᵉ', 'f': 'ᶠ', 'g': 'ᵍ', 'h': 'ʰ', 'i': 'ⁱ', 'j': 'ʲ',
+        'k': 'ᵏ', 'l': 'ˡ', 'm': 'ᵐ', 'n': 'ⁿ', 'o': 'ᵒ', 'p': 'ᵖ', 'q': '۹', 'r': 'ʳ', 's': 'ˢ', 't': 'ᵗ',
+        'u': 'ᵘ', 'v': 'ᵛ', 'w': 'ʷ', 'x': 'ˣ', 'y': 'ʸ', 'z': 'ᶻ',
+        'A': 'ᴬ', 'B': 'ᴮ', 'C': 'ᶜ', 'D': 'ᴰ', 'E': 'ᴱ', 'F': 'ᶠ', 'G': 'ᴳ', 'H': 'ᴴ', 'I': 'ᴵ', 'J': 'ᴶ',
+        'K': 'ᴷ', 'L': 'ᴸ', 'M': 'ᴹ', 'N': 'ᴺ', 'O': 'ᴼ', 'P': 'ᴾ', 'Q': 'ᵠ', 'R': 'ᴿ', 'S': 'ˢ', 'T': 'ᵀ',
+        'U': 'ᵁ', 'V': 'ⱽ', 'W': 'ᵂ', 'X': 'ˣ', 'Y': 'ʸ', 'Z': 'ᶻ',
+        '+': '⁺', '-': '⁻', '=': '⁼', '(': '⁽', ')': '⁾'
+    };
+
+    // Remplacements pour superscripts multiples ^{...}
+    content = content.replace(/\^\{([0-9a-zA-Z+\-=()]+)\}/g, (match, p1) => 
+        p1.split('').map(char => superscripts[char] || char).join('')
+    );
+
+    // Remplacements pour superscripts simples ^x
+    content = content.replace(/\^([0-9a-zA-Z+\-=()])/g, (match, p1) => superscripts[p1] || `^${p1}`);
+
+    // Primes ' → ′
+    content = content.replace(/([a-zA-Z0-9\)]+)'/g, '$1′');
+
+    // Vecteurs: \vec{r} → r⃗
+    content = content.replace(/\\vec\{(.*?)\}/g, '$1⃗');
+
+    // Fonctions trigonométriques
+    content = content.replace(/\\sin/g, 'sin');
+    content = content.replace(/\\cos/g, 'cos');
+    content = content.replace(/\\tan/g, 'tan');
+
+    // Autres symboles communs
+    content = content.replace(/\\infty/g, '∞');
+    content = content.replace(/\\pi/g, 'π');
+    content = content.replace(/\\approx/g, '≈');
+    content = content.replace(/\\neq/g, '≠');
+    content = content.replace(/\\geq/g, '≥');
+    content = content.replace(/\\leq/g, '≤');
+    content = content.replace(/\\circ/g, '∘');
+    content = content.replace(/\\cdot/g, '⋅');
+
+    // Fractions simples: \frac{a}{b} → a/b (ou mieux si possible)
+    content = content.replace(/\\frac\{(.*?)\}\{(.*?)\}/g, '($1)/($2)');
+
+    return content;
+}
+
 function parseMarkdown(text) {
     if (!text || typeof text !== 'string') return text;
     
@@ -96,7 +153,20 @@ function parseMarkdown(text) {
     parsed = parsed.replace(/~~([^~]+)~~/g, (match, content) => toStrikethrough(content));
     parsed = parsed.replace(/^[\s]*[-*]\s+(.+)$/gm, (match, content) => `• ${content.trim()}`);
     
+    // 🆕 Gérer les expressions mathématiques inline \( ... \)
+    parsed = parsed.replace(/\\\((.*?)\\\)/g, (match, content) => parseLatexMath(content));
+    
+    // 🆕 Gérer les expressions mathématiques display \[ ... \]
+    parsed = parsed.replace(/\\\[([\s\S]*?)\\\]/g, (match, content) => `\n${parseLatexMath(content)}\n`);
+
     return parsed;
+}
+
+// 🆕 Fonction pour nettoyer la réponse de l'IA en supprimant 🕒... ou multiples
+function cleanResponse(text) {
+    if (!text) return text;
+    // Supprime 🕒... isolé ou répété avec espaces
+    return text.replace(/🕒\.\.\.(\s*🕒\.\.\.)*/g, '').trim();
 }
 
 // ========================================
@@ -110,8 +180,6 @@ function checkIfAllGeminiKeysDead() {
     }
     
     const now = Date.now();
-    
-    // Recheck toutes les 5 minutes
     if (allGeminiKeysDead && (now - lastGeminiCheck > GEMINI_RECHECK_INTERVAL)) {
         allGeminiKeysDead = false;
         failedKeys.clear();
@@ -156,7 +224,6 @@ function markKeyAsFailed(apiKey) {
 }
 
 async function callGeminiWithRotation(prompt, maxRetries = GEMINI_API_KEYS.length) {
-    // 🆕 OPTIMISATION: Skip si toutes les clés sont mortes
     if (checkIfAllGeminiKeysDead()) {
         throw new Error('Toutes les clés Gemini sont inutilisables - Utilisation de Mistral');
     }
@@ -181,7 +248,6 @@ async function callGeminiWithRotation(prompt, maxRetries = GEMINI_API_KEYS.lengt
             
         } catch (error) {
             lastError = error;
-            
             if (error.message.includes('API_KEY') || error.message.includes('quota') || error.message.includes('limit')) {
                 const currentKey = GEMINI_API_KEYS[(currentGeminiKeyIndex - 1 + GEMINI_API_KEYS.length) % GEMINI_API_KEYS.length];
                 markKeyAsFailed(currentKey);
@@ -206,7 +272,6 @@ async function callMistralUnified(prompt, ctx, maxTokens = 2000) {
     }
     
     try {
-        // Convertir le prompt en format messages Mistral
         const messages = [
             {
                 role: "system",
@@ -497,7 +562,6 @@ Réponds UNIQUEMENT avec ce JSON:
 
         let response;
         
-        // 🆕 Essayer Gemini d'abord si disponible, sinon Mistral
         if (!checkIfAllGeminiKeysDead()) {
             try {
                 response = await callGeminiWithRotation(contextPrompt);
@@ -592,7 +656,6 @@ Réponds UNIQUEMENT avec ce JSON:
 
         let response;
         
-        // 🆕 Essayer Gemini d'abord si disponible, sinon Mistral
         if (!checkIfAllGeminiKeysDead()) {
             try {
                 response = await callGeminiWithRotation(decisionPrompt);
@@ -638,7 +701,7 @@ Réponds UNIQUEMENT avec ce JSON:
 }
 
 // ========================================
-// 🎯 DÉTECTION COMMANDES - GEMINI OU MISTRAL
+// 🎯 DÉTECTION COMMANDES - GEMINI OU MISTRAL (assoupli pour /image)
 // ========================================
 
 const VALID_COMMANDS = [
@@ -665,10 +728,10 @@ ${recentHistory}
 
 MESSAGE ACTUEL: "${message}"
 
-⚠️ IMPORTANT: La commande /help est DÉJÀ intégrée dans le système conversationnel, ne la détecte PAS.
+⚠️ IMPORTANT: La commande /help est DÉJÀ intégrée dans le système, ne la détecte PAS.
 
-VRAIES INTENTIONS DE COMMANDES (confidence >= 0.85):
-✅ /image: Demande EXPLICITE de CRÉER/GÉNÉRER une image, dessin, illustration (ex: "dessine-moi un chat", "génère une image de...")
+VRAIES INTENTIONS DE COMMANDES (confidence >= 0.8):
+✅ /image: Toute demande de CRÉER/GÉNÉRER une image, même simple (ex: "cree une image de chat", "fais une image de maison en feu", "génère un dessin de...", "dessine un...")
 ✅ /vision: Demande EXPLICITE d'ANALYSER une image déjà envoyée (ex: "décris cette image", "que vois-tu sur la photo")
 ✅ /anime: Demande EXPLICITE de TRANSFORMER une image en style anime/manga (ex: "transforme en anime", "style manga")
 ✅ /music: Demande EXPLICITE de RECHERCHER/JOUER une musique sur YouTube (ex: "joue la chanson...", "cherche musique de...")
@@ -688,7 +751,7 @@ RÈGLES STRICTES:
 1. L'utilisateur DOIT vouloir UTILISER une fonctionnalité SPÉCIFIQUE du bot
 2. Il DOIT y avoir une DEMANDE D'ACTION CLAIRE et DIRECTE
 3. Tenir compte du CONTEXTE conversationnel
-4. Confidence MINIMUM 0.85 pour valider
+4. Confidence MINIMUM 0.8 pour valider (assoupli pour /image si clair)
 5. En cas de doute → NE PAS détecter de commande
 
 Réponds UNIQUEMENT avec ce JSON:
@@ -703,19 +766,18 @@ Réponds UNIQUEMENT avec ce JSON:
 
         let response;
         
-        // 🆕 Essayer Gemini d'abord si disponible, sinon Mistral
         if (!checkIfAllGeminiKeysDead()) {
             try {
                 response = await callGeminiWithRotation(detectionPrompt);
-                log.info(`💎 Détection commande via Gemini`);
+                log.info(`💎 Détection commande via Gemini pour "${message.substring(0, 50)}..."`);
             } catch (geminiError) {
                 log.warning(`⚠️ Gemini échec détection: ${geminiError.message}`);
                 response = await callMistralUnified(detectionPrompt, ctx, 500);
-                log.info(`🔄 Détection commande via Mistral`);
+                log.info(`🔄 Détection commande via Mistral pour "${message.substring(0, 50)}..."`);
             }
         } else {
             response = await callMistralUnified(detectionPrompt, ctx, 500);
-            log.info(`🔄 Détection commande via Mistral (Gemini désactivé)`);
+            log.info(`🔄 Détection commande via Mistral (Gemini désactivé) pour "${message.substring(0, 50)}..."`);
         }
         
         const jsonMatch = response.match(/\{[\s\S]*\}/);
@@ -723,9 +785,16 @@ Réponds UNIQUEMENT avec ce JSON:
         if (jsonMatch) {
             const aiDetection = JSON.parse(jsonMatch[0]);
             
+            // 🆕 FIX: Retirer le slash du nom de commande si présent
+            if (aiDetection.command) {
+                aiDetection.command = aiDetection.command.replace('/', '');
+            }
+            
+            log.debug(`🔍 Résultat détection IA (après fix slash): ${JSON.stringify(aiDetection)}`);
+            
             const isValid = aiDetection.isCommand && 
                           VALID_COMMANDS.includes(aiDetection.command) && 
-                          aiDetection.confidence >= 0.85;
+                          aiDetection.confidence >= 0.8;
             
             if (isValid) {
                 log.info(`🎯 Commande détectée: /${aiDetection.command} (${aiDetection.confidence})`);
@@ -736,56 +805,74 @@ Réponds UNIQUEMENT avec ce JSON:
                     command: aiDetection.command,
                     args: aiDetection.extractedArgs,
                     confidence: aiDetection.confidence,
-                    method: 'ai_unified'
+                    method: 'ai_contextual'
                 };
-            } else if (aiDetection.confidence > 0.4 && aiDetection.confidence < 0.85) {
-                log.info(`🚫 Commande rejetée (confidence ${aiDetection.confidence})`);
+            } else {
+                log.debug(`🚫 Pas de commande détectée (confidence ${aiDetection.confidence}, command: ${aiDetection.command}, isCommand: ${aiDetection.isCommand})`);
+                return { shouldExecute: false };
             }
         }
         
-        return { shouldExecute: false };
+        throw new Error('Format invalide');
         
     } catch (error) {
-        log.warning(`⚠️ Erreur détection commandes: ${error.message}`);
-        return { shouldExecute: false };
+        log.warning(`⚠️ Erreur détection IA commandes pour "${message.substring(0, 50)}...": ${error.message}`);
+        
+        // Fallback strict par mots-clés
+        return fallbackStrictKeywordDetection(message, log);
     }
 }
 
+// Fallback strict par mots-clés (amélioré pour plus de variations)
+function fallbackStrictKeywordDetection(message, log) {
+    const lowerMessage = message.toLowerCase().trim().normalize("NFD").replace(/[\u0300-\u036f]/g, ""); // Normaliser accents et fautes
+    
+    const strictPatterns = [
+        { command: 'image', patterns: [
+            /^cree\s+(une\s+)?image/, /^cree\s+(une\s+)?dessin/, /^fais\s+(une\s+)?image/, /^genere\s+(une\s+)?image/, 
+            /^dessine\s+/, /^illustre\s+/, /^cree\s+(un\s+)?chat/, /^fais\s+(un\s+)?chat/ // Ajout variations fautes
+        ] },
+        { command: 'vision', patterns: [/^regarde\s+(cette\s+)?(image|photo)/, /^(analyse|decrit|examine)\s+(cette\s+)?(image|photo)/, /^que vois-tu/] },
+        { command: 'anime', patterns: [/^transforme en anime/, /^style (anime|manga)/, /^version manga/, /^art anime/] },
+        { command: 'music', patterns: [/^(joue|lance|play)\s+/, /^(trouve|cherche)\s+(sur\s+youtube\s+)?cette\s+(musique|chanson)/, /^(cherche|trouve)\s+la\s+(musique|chanson)\s+/] },
+        { command: 'clan', patterns: [/^(rejoindre|creer|mon)\s+clan/, /^bataille\s+de\s+clan/, /^(defier|guerre)\s+/] },
+        { command: 'rank', patterns: [/^(mon\s+)?(niveau|rang|stats|progression)/, /^mes\s+(stats|points)/] },
+        { command: 'contact', patterns: [/^contacter\s+(admin|administrateur)/, /^signaler\s+probleme/, /^support\s+technique/] },
+        { command: 'weather', patterns: [/^(meteo|quel\s+temps|temperature|previsions)/, /^temps\s+qu.il\s+fait/] }
+    ];
+    
+    for (const { command, patterns } of strictPatterns) {
+        for (const pattern of patterns) {
+            if (pattern.test(lowerMessage)) {
+                log.info(`🔑 Fallback keyword strict: /${command} détecté pour "${message.substring(0, 50)}..."`);
+                return {
+                    shouldExecute: true,
+                    command,
+                    args: message,
+                    confidence: 0.9,
+                    method: 'fallback_strict'
+                };
+            }
+        }
+    }
+    
+    log.debug(`🚫 Pas de commande fallback pour "${message.substring(0, 50)}..."`);
+    return { shouldExecute: false };
+}
+
 // ========================================
-// 🎭 GÉNÉRATION RÉPONSE - GEMINI OU MISTRAL
+// 📝 GÉNÉRATION RÉPONSE NATURELLE AVEC CONTEXTE
 // ========================================
 
-async function generateNaturalResponseWithContext(originalQuery, searchResults, conversationContext, ctx) {
-    const { log } = ctx;
+async function generateNaturalResponseWithContext(originalQuery, searchResults, conversationHistory, ctx) {
+    const { log, callMistralAPI } = ctx;
     
-    const now = new Date();
-    const dateTime = now.toLocaleString('fr-FR', { 
-        weekday: 'long', 
-        year: 'numeric', 
-        month: 'long', 
-        day: 'numeric', 
-        hour: '2-digit', 
-        minute: '2-digit',
-        timeZone: 'Europe/Paris'
-    });
+    const resultsText = searchResults.map((r, i) => `${i+1}. ${r.title}: ${r.description}`).join('\n\n');
     
     try {
-        const resultsText = searchResults.map((result, index) => 
-            `${index + 1}. ${result.title}: ${result.description}`
-        ).join('\n\n');
-        
-        let conversationHistory = "";
-        if (conversationContext && conversationContext.length > 0) {
-            conversationHistory = conversationContext.map(msg => 
-                `${msg.role === 'user' ? 'Utilisateur' : 'NakamaBot'}: ${msg.content}`
-            ).join('\n') + '\n';
-        }
-        
-        const contextualPrompt = `Tu es NakamaBot, une IA conversationnelle empathique avec MÉMOIRE CONTEXTUELLE.
+        const contextualPrompt = `Tu es NakamaBot avec MÉMOIRE COMPLÈTE.
 
-CONTEXTE TEMPOREL: ${dateTime}
-
-HISTORIQUE COMPLET:
+HISTORIQUE:
 ${conversationHistory || "Début de conversation"}
 
 QUESTION ACTUELLE: "${originalQuery}"
@@ -809,54 +896,66 @@ RÉPONSE NATURELLE:`;
 
         let response;
         
-        // 🆕 Essayer Gemini d'abord si disponible, sinon Mistral
         if (!checkIfAllGeminiKeysDead()) {
             try {
                 response = await callGeminiWithRotation(contextualPrompt);
                 log.info(`💎 Réponse contextuelle Gemini`);
-                
-                if (response && response.trim()) {
-                    return response;
-                }
             } catch (geminiError) {
                 log.warning(`⚠️ Gemini échec réponse: ${geminiError.message}`);
             }
         }
         
-        // Fallback Mistral
-        const messages = [{
-            role: "system",
-            content: `Tu es NakamaBot avec MÉMOIRE COMPLÈTE. Réponds naturellement. Ne mentionne JAMAIS de recherches. Markdown simple OK.
+        if (!response) {
+            const messages = [{
+                role: "system",
+                content: `Tu es NakamaBot avec MÉMOIRE COMPLÈTE. Réponds naturellement. Ne mentionne JAMAIS de recherches. Markdown simple OK.
 
 Historique:
 ${conversationHistory || "Début"}`
-        }, {
-            role: "user", 
-            content: `Question: "${originalQuery}"
+            }, {
+                role: "user", 
+                content: `Question: "${originalQuery}"
 
 Informations:
 ${resultsText}
 
 Réponds naturellement (max 2000 chars):`
-        }];
-        
-        const mistralResponse = await ctx.callMistralAPI(messages, 2000, 0.7);
-        
-        if (mistralResponse) {
+            }];
+            
+            response = await callMistralAPI(messages, 2000, 0.7);
             log.info(`🔄 Réponse contextuelle Mistral`);
-            return mistralResponse;
         }
         
-        throw new Error('Toutes les IA ont échoué');
-        
-    } catch (error) {
-        log.error(`❌ Erreur génération réponse: ${error.message}`);
+        if (response) {
+            // 🆕 Vérifier et éviter le contenu spécifique mentionné
+            let forbiddenContent = "🔹 🔹 𝗘𝘅𝗲𝗺𝗽𝗹𝗲𝘀\n1. 𝗗é𝗿𝗶𝘃é𝗲 𝗱'𝘂𝗻𝗲 𝗳𝗼𝗻𝗰𝘁𝗶𝗼𝗻 𝗽𝗼𝗹𝘆𝗻𝗼𝗺𝗶𝗮𝗹𝗲 :\n   Si \\( f(x) = x^2 \\), alors \\( f'(x) = 2x \\).\n   *Interprétation* : La pente de la parabole \\( y = x^2 \\) en \\( x = 2 \\) est \\( 4 \\).\n\n2. 𝗗é𝗿𝗶𝘃é𝗲 𝗱'𝘂𝗻𝗲 𝗳𝗼𝗻𝗰𝘁𝗶𝗼𝗻 𝘁𝗿𝗶𝗴𝗼𝗻𝗼𝗺é𝘁𝗿𝗶𝗾𝘂𝗲 :\n   Si \\( f(t) = \\sin(t) \\), alors \\( f'(t) = \\cos(t) \\).\n   *Interprétation* : La vitesse instantanée d'un mouvement sinusoïdal est proportionnelle à sa position.\n\n🔹 🔹 𝗔𝗽𝗽𝗹𝗶𝗰𝗮𝘁𝗶𝗼𝗻𝘀 𝗽𝗵𝘆𝘀𝗶𝗾𝘂𝗲𝘀\n• 𝗩𝗶𝘁𝗲𝘀𝘀𝗲 : La dérivée de la position \\( \\vec{r}(t) \\) donne la vitesse \\( \\vec{v}(t) \\).\n• 𝗔𝗰𝗰é𝗹é𝗿𝗮𝘁𝗶𝗼𝗻 : La dérivée de la vitesse \\( \\vec{v}(t) \\) donne l'accélération \\( \\vec{a}(t) \\).\n\n🔹 🔹 𝗥è𝗴𝗹𝗲 𝗱𝗲 𝗱é𝗿𝗶𝘃𝗮𝘁𝗶𝗼𝗻 𝗰𝗼𝘂𝗿𝗮𝗻𝘁𝗲𝘀\n• 𝗦𝗼𝗺𝗺𝗲 : \\( (f + g)' = f' + g' \\)\n• 𝗣𝗿𝗼𝗱𝘂𝗶𝘁 : \\( (fg)' = f'g + fg' \\)\n• 𝗖𝗵𝗮î𝗻𝗲𝘁𝘁𝗲 : \\( (f \\circ g)' = (f' \\circ g) \\cdot g' \\)";
+            if (response.includes(forbiddenContent)) {
+                response = response.replace(forbiddenContent, ""); // Supprimer le contenu interdit
+            }
+
+            forbiddenContent = "Si \\( f(t) = \\sin(t) \\), alors \\( f'(t) = \\cos(t) \\).\n   *Interprétation* : La vitesse instantanée d'un mouvement sinusoïdal est proportionnelle à sa position.\n\n🔹 🔹 𝗔𝗽𝗽𝗹𝗶𝗰𝗮𝘁𝗶𝗼𝗻𝘀 𝗽𝗵𝘆𝘀𝗶𝗾𝘂𝗲𝘀\n• 𝗩𝗶𝘁𝗲𝘀𝘀𝗲 : La dérivée de la position \\( \\vec{r}(t) \\) donne la vitesse \\( \\vec{v}(t) \\).\n• 𝗔𝗰𝗰é𝗹é𝗿𝗮𝘁𝗶𝗼𝗻 : La dérivée de la vitesse \\( \\vec{v}(t) \\) donne l'accélération \\( \\vec{a}(t) \\).\n\n🔹 🔹 𝗥è𝗴𝗹𝗲 𝗱𝗲 𝗱é𝗿𝗶𝘃𝗮𝘁𝗶𝗼𝗻 𝗰𝗼𝘂𝗿𝗮𝗻𝘁𝗲𝘀\n• 𝗦𝗼𝗺𝗺𝗲 : \\( (f + g)' = f' + g' \\)\n• 𝗣𝗿𝗼𝗱𝘂𝗶𝘁 : \\( (fg)' = f'g + fg' \\)\n• 𝗖𝗵𝗮î𝗻𝗲𝘁𝘁𝗲 : \\( (f \\circ g)' = (f' \\circ g) \\cdot g' \\)";
+            if (response.includes(forbiddenContent)) {
+                response = response.replace(forbiddenContent, ""); // Supprimer le contenu interdit supplémentaire
+            }
+
+            if (!response.trim()) {
+                response = "Désolé, je ne peux pas fournir cette explication spécifique pour le moment. Peux-tu reformuler ta question ?";
+            }
+
+            // 🆕 Nettoyer la réponse avant de la retourner
+            response = cleanResponse(response);
+            return response;
+        }
         
         const topResult = searchResults[0];
         if (topResult) {
             return `D'après ce que je sais, ${topResult.description} 💡`;
         }
         
+        return null;
+        
+    } catch (error) {
+        log.error(`❌ Erreur génération réponse: ${error.message}`);
         return null;
     }
 }
@@ -890,7 +989,6 @@ async function handleConversationWithFallback(senderId, args, ctx, searchResults
         ).join('\n') + '\n';
     }
     
-    // 🆕 INJECTION RÉSULTATS RECHERCHE
     let searchContext = "";
     if (searchResults && searchResults.length > 0) {
         searchContext = `\n\n🔍 INFORMATIONS RÉCENTES DISPONIBLES (utilise-les naturellement):
@@ -945,56 +1043,43 @@ Utilisateur: ${args}`;
 
     const senderIdStr = String(senderId);
 
-    // 🆕 ESSAYER GEMINI D'ABORD SI DISPONIBLE
-    if (!checkIfAllGeminiKeysDead()) {
-        try {
-            const geminiResponse = await callGeminiWithRotation(systemPrompt);
-            
-            if (geminiResponse && geminiResponse.trim()) {
-                const styledResponse = parseMarkdown(geminiResponse);
-                
-                if (styledResponse.length > 2000) {
-                    const chunks = splitMessageIntoChunks(styledResponse, 2000);
-                    const firstChunk = chunks[0];
-                    
-                    if (chunks.length > 1) {
-                        truncatedMessages.set(senderIdStr, {
-                            fullMessage: styledResponse,
-                            lastSentPart: firstChunk,
-                            timestamp: new Date().toISOString()
-                        });
-                        
-                        const truncatedResponse = firstChunk + "\n\n📝 *Tape \"continue\" pour la suite...*";
-                        addToMemory(senderIdStr, 'user', args);
-                        addToMemory(senderIdStr, 'assistant', truncatedResponse);
-                        log.info(`💎 Gemini avec troncature${searchResults ? ' (+ recherche)' : ''}`);
-                        return truncatedResponse;
-                    }
-                }
-                
-                addToMemory(senderIdStr, 'user', args);
-                addToMemory(senderIdStr, 'assistant', styledResponse);
-                log.info(`💎 Gemini réponse${searchResults ? ' (+ recherche)' : ''}`);
-                return styledResponse;
-            }
-            
-        } catch (geminiError) {
-            log.warning(`⚠️ Gemini échec conversation: ${geminiError.message}`);
-        }
-    } else {
-        log.info(`⏩ Gemini désactivé - Utilisation directe de Mistral`);
-    }
-    
-    // 🆕 FALLBACK MISTRAL
     try {
-        const messages = [{ role: "system", content: systemPrompt }];
-        messages.push(...context);
-        messages.push({ role: "user", content: args });
+        let response;
+        if (!checkIfAllGeminiKeysDead()) {
+            response = await callGeminiWithRotation(systemPrompt);
+            if (response && response.trim()) {
+                log.info(`💎 Gemini réponse${searchResults ? ' (+ recherche)' : ''}`);
+            }
+        }
         
-        const mistralResponse = await callMistralAPI(messages, 2000, 0.75);
+        if (!response) {
+            const messages = [{ role: "system", content: systemPrompt }];
+            messages.push(...context);
+            messages.push({ role: "user", content: args });
+            
+            response = await callMistralAPI(messages, 2000, 0.75);
+            log.info(`🔄 Mistral réponse${searchResults ? ' (+ recherche)' : ''}`);
+        }
         
-        if (mistralResponse) {
-            const styledResponse = parseMarkdown(mistralResponse);
+        if (response) {
+            // 🆕 Vérifier et éviter le contenu spécifique mentionné
+            let forbiddenContent = "🔹 🔹 𝗘𝘅𝗲𝗺𝗽𝗹𝗲𝘀\n1. 𝗗é𝗿𝗶𝘃é𝗲 𝗱'𝘂𝗻𝗲 𝗳𝗼𝗻𝗰𝘁𝗶𝗼𝗻 𝗽𝗼𝗹𝘆𝗻𝗼𝗺𝗶𝗮𝗹𝗲 :\n   Si \\( f(x) = x^2 \\), alors \\( f'(x) = 2x \\).\n   *Interprétation* : La pente de la parabole \\( y = x^2 \\) en \\( x = 2 \\) est \\( 4 \\).\n\n2. 𝗗é𝗿𝗶𝘃é𝗲 𝗱'𝘂𝗻𝗲 𝗳𝗼𝗻𝗰𝘁𝗶𝗼𝗻 𝘁𝗿𝗶𝗴𝗼𝗻𝗼𝗺é𝘁𝗿𝗶𝗾𝘂𝗲 :\n   Si \\( f(t) = \\sin(t) \\), alors \\( f'(t) = \\cos(t) \\).\n   *Interprétation* : La vitesse instantanée d'un mouvement sinusoïdal est proportionnelle à sa position.\n\n🔹 🔹 𝗔𝗽𝗽𝗹𝗶𝗰𝗮𝘁𝗶𝗼𝗻𝘀 𝗽𝗵𝘆𝘀𝗶𝗾𝘂𝗲𝘀\n• 𝗩𝗶𝘁𝗲𝘀𝘀𝗲 : La dérivée de la position \\( \\vec{r}(t) \\) donne la vitesse \\( \\vec{v}(t) \\).\n• 𝗔𝗰𝗰é𝗹é𝗿𝗮𝘁𝗶𝗼𝗻 : La dérivée de la vitesse \\( \\vec{v}(t) \\) donne l'accélération \\( \\vec{a}(t) \\).\n\n🔹 🔹 𝗥è𝗴𝗹𝗲 𝗱𝗲 𝗱é𝗿𝗶𝘃𝗮𝘁𝗶𝗼𝗻 𝗰𝗼𝘂𝗿𝗮𝗻𝘁𝗲𝘀\n• 𝗦𝗼𝗺𝗺𝗲 : \\( (f + g)' = f' + g' \\)\n• 𝗣𝗿𝗼𝗱𝘂𝗶𝘁 : \\( (fg)' = f'g + fg' \\)\n• 𝗖𝗵𝗮î𝗻𝗲𝘁𝘁𝗲 : \\( (f \\circ g)' = (f' \\circ g) \\cdot g' \\)";
+            if (response.includes(forbiddenContent)) {
+                response = response.replace(forbiddenContent, ""); // Supprimer le contenu interdit
+            }
+
+            forbiddenContent = "Si \\( f(t) = \\sin(t) \\), alors \\( f'(t) = \\cos(t) \\).\n   *Interprétation* : La vitesse instantanée d'un mouvement sinusoïdal est proportionnelle à sa position.\n\n🔹 🔹 𝗔𝗽𝗽𝗹𝗶𝗰𝗮𝘁𝗶𝗼𝗻𝘀 𝗽𝗵𝘆𝘀𝗶𝗾𝘂𝗲𝘀\n• 𝗩𝗶𝘁𝗲𝘀𝘀𝗲 : La dérivée de la position \\( \\vec{r}(t) \\) donne la vitesse \\( \\vec{v}(t) \\).\n• 𝗔𝗰𝗰é𝗹é𝗿𝗮𝘁𝗶𝗼𝗻 : La dérivée de la vitesse \\( \\vec{v}(t) \\) donne l'accélération \\( \\vec{a}(t) \\).\n\n🔹 🔹 𝗥è𝗴𝗹𝗲 𝗱𝗲 𝗱é𝗿𝗶𝘃𝗮𝘁𝗶𝗼𝗻 𝗰𝗼𝘂𝗿𝗮𝗻𝘁𝗲𝘀\n• 𝗦𝗼𝗺𝗺𝗲 : \\( (f + g)' = f' + g' \\)\n• 𝗣𝗿𝗼𝗱𝘂𝗶𝘁 : \\( (fg)' = f'g + fg' \\)\n• 𝗖𝗵𝗮î𝗻𝗲𝘁𝘁𝗲 : \\( (f \\circ g)' = (f' \\circ g) \\cdot g' \\)";
+            if (response.includes(forbiddenContent)) {
+                response = response.replace(forbiddenContent, ""); // Supprimer le contenu interdit supplémentaire
+            }
+
+            if (!response.trim()) {
+                response = "Désolé, je ne peux pas fournir cette explication spécifique pour le moment. Peux-tu reformuler ta question ?";
+            }
+
+            // 🆕 Nettoyer la réponse avant de la styliser
+            response = cleanResponse(response);
+            const styledResponse = parseMarkdown(response);
             
             if (styledResponse.length > 2000) {
                 const chunks = splitMessageIntoChunks(styledResponse, 2000);
@@ -1010,21 +1095,19 @@ Utilisateur: ${args}`;
                     const truncatedResponse = firstChunk + "\n\n📝 *Tape \"continue\" pour la suite...*";
                     addToMemory(senderIdStr, 'user', args);
                     addToMemory(senderIdStr, 'assistant', truncatedResponse);
-                    log.info(`🔄 Mistral avec troncature${searchResults ? ' (+ recherche)' : ''}`);
                     return truncatedResponse;
                 }
             }
             
             addToMemory(senderIdStr, 'user', args);
             addToMemory(senderIdStr, 'assistant', styledResponse);
-            log.info(`🔄 Mistral réponse${searchResults ? ' (+ recherche)' : ''}`);
             return styledResponse;
         }
         
-        throw new Error('Mistral échec');
+        throw new Error('Toutes les IA ont échoué');
         
-    } catch (mistralError) {
-        log.error(`❌ Erreur totale: ${mistralError.message}`);
+    } catch (error) {
+        log.error(`❌ Erreur conversation: ${error.message}`);
         
         const errorResponse = "🤔 J'ai rencontré une difficulté technique. Peux-tu reformuler ? 💫";
         const styledError = parseMarkdown(errorResponse);
@@ -1094,62 +1177,52 @@ async function executeCommandFromChat(senderId, commandName, args, ctx) {
     const { log } = ctx;
     
     try {
-        log.info(`⚙️ Exécution de la commande /${commandName} avec args: "${args.substring(0, 100)}..."`);
+        log.info(`⚙️ Exécution de /${commandName} avec args: "${args.substring(0, 100)}..."`);
         
         const COMMANDS = global.COMMANDS || new Map();
         
-        // Vérifier si la commande est chargée dans global.COMMANDS
         if (COMMANDS.has(commandName)) {
-            log.debug(`✅ Commande /${commandName} trouvée dans COMMANDS globales`);
             const commandFunction = COMMANDS.get(commandName);
             const result = await commandFunction(senderId, args, ctx);
-            log.info(`✅ Résultat commande /${commandName}: ${typeof result === 'object' ? 'Object' : result.substring(0, 100)}`);
+            log.info(`✅ Résultat /${commandName}: ${typeof result === 'object' ? 'Object' : result.substring(0, 100)}`);
             return { success: true, result };
         }
         
-        // Sinon, essayer de charger directement depuis le fichier
-        const path = require('path');
-        const fs = require('fs');
         const commandPath = path.join(__dirname, `${commandName}.js`);
         
         if (fs.existsSync(commandPath)) {
-            log.debug(`✅ Fichier commande trouvé: ${commandPath}`);
             delete require.cache[require.resolve(commandPath)];
             const commandModule = require(commandPath);
             
             if (typeof commandModule === 'function') {
-                log.debug(`✅ Module commande chargé pour /${commandName}`);
                 const result = await commandModule(senderId, args, ctx);
-                log.info(`✅ Résultat commande /${commandName}: ${typeof result === 'object' ? 'Object' : result.substring(0, 100)}`);
+                log.info(`✅ Résultat /${commandName}: ${typeof result === 'object' ? 'Object' : result.substring(0, 100)}`);
                 return { success: true, result };
             } else {
-                log.error(`❌ Le module ${commandName}.js n'exporte pas une fonction`);
+                log.error(`❌ Module ${commandName}.js n'exporte pas une fonction`);
                 return { success: false, error: `Module ${commandName} invalide` };
             }
         }
         
-        log.error(`❌ Commande ${commandName} introuvable (ni dans COMMANDS ni en fichier)`);
+        log.error(`❌ Commande ${commandName} introuvable`);
         return { success: false, error: `Commande ${commandName} non trouvée` };
         
     } catch (error) {
-        log.error(`❌ Erreur fatale lors de l'exécution de /${commandName}: ${error.message}`);
-        log.error(`📊 Stack: ${error.stack}`);
+        log.error(`❌ Erreur exécution /${commandName}: ${error.message}`);
         return { success: false, error: error.message };
     }
 }
 
 async function generateContextualResponse(originalMessage, commandResult, commandName, ctx) {
-    const { log } = ctx;
+    const { log, callMistralAPI } = ctx;
     
-    // Si c'est une image, retourner directement
     if (typeof commandResult === 'object' && commandResult.type === 'image') {
-        log.debug(`🖼️ Résultat de type image pour /${commandName}, retour direct`);
+        log.debug(`🖼️ Résultat image pour /${commandName}, retour direct`);
         return commandResult;
     }
     
-    // Si le résultat est déjà une réponse complète et naturelle, le retourner tel quel
     if (typeof commandResult === 'string' && commandResult.length > 100) {
-        log.debug(`📝 Résultat /${commandName} déjà complet, retour direct`);
+        log.debug(`📝 Résultat /${commandName} déjà complet`);
         return commandResult;
     }
     
@@ -1160,38 +1233,21 @@ La commande /${commandName} a retourné: "${commandResult}"
 
 Réponds naturellement et amicalement pour présenter ce résultat (max 400 chars). Markdown simple OK (**gras**, listes), pas d'italique.`;
 
-        let response;
-        
-        // 🆕 Essayer Gemini d'abord si disponible
-        if (!checkIfAllGeminiKeysDead()) {
-            try {
-                response = await callGeminiWithRotation(contextPrompt);
-                if (response && response.trim()) {
-                    log.info(`💎 Réponse contextuelle Gemini pour /${commandName}`);
-                    return response;
-                }
-            } catch (geminiError) {
-                log.debug(`⚠️ Gemini échec réponse contextuelle: ${geminiError.message}`);
-            }
+        let response = await callGeminiWithRotation(contextPrompt);
+        if (!response) {
+            response = await callMistralAPI([
+                { role: "system", content: "Tu es NakamaBot. Réponds naturellement pour présenter le résultat d'une commande. Markdown simple OK." },
+                { role: "user", content: `Utilisateur: "${originalMessage}"\n\nRésultat commande /${commandName}: "${commandResult}"\n\nPrésente naturellement (max 300 chars):` }
+            ], 300, 0.7);
         }
         
-        // Fallback Mistral
-        response = await ctx.callMistralAPI([
-            { role: "system", content: "Tu es NakamaBot. Réponds naturellement pour présenter le résultat d'une commande. Markdown simple OK." },
-            { role: "user", content: `Utilisateur: "${originalMessage}"\n\nRésultat commande /${commandName}: "${commandResult}"\n\nPrésente naturellement (max 300 chars):` }
-        ], 300, 0.7);
-        
-        if (response && response.trim()) {
-            log.info(`🔄 Réponse contextuelle Mistral pour /${commandName}`);
-            return response;
-        }
-        
-        // Si tout échoue, retourner le résultat brut
-        log.warning(`⚠️ Échec génération réponse contextuelle, retour résultat brut`);
-        return commandResult;
+        // 🆕 Nettoyer la réponse
+        response = cleanResponse(response);
+
+        return response || commandResult;
         
     } catch (error) {
-        log.error(`❌ Erreur génération réponse contextuelle: ${error.message}`);
+        log.error(`❌ Erreur réponse contextuelle: ${error.message}`);
         return commandResult;
     }
 }
@@ -1201,10 +1257,9 @@ Réponds naturellement et amicalement pour présenter ce résultat (max 400 char
 // ========================================
 
 module.exports = async function cmdChat(senderId, args, ctx) {
-    const { addToMemory, getMemoryContext, callMistralAPI, log, 
+    const { addToMemory, getMemoryContext, log, 
             truncatedMessages, splitMessageIntoChunks, isContinuationRequest } = ctx;
     
-    // Protection anti-doublons
     const messageSignature = `${senderId}_${args.trim().toLowerCase()}`;
     const currentTime = Date.now();
     
@@ -1221,7 +1276,6 @@ module.exports = async function cmdChat(senderId, args, ctx) {
         return;
     }
     
-    // Délai 5 secondes entre messages
     const lastMessageTime = Array.from(recentMessages.entries())
         .filter(([sig]) => sig.startsWith(`${senderId}_`))
         .map(([, timestamp]) => timestamp)
@@ -1237,7 +1291,6 @@ module.exports = async function cmdChat(senderId, args, ctx) {
     activeRequests.set(senderId, `${senderId}_${currentTime}`);
     recentMessages.set(messageSignature, currentTime);
     
-    // Nettoyage cache
     for (const [signature, timestamp] of recentMessages.entries()) {
         if (currentTime - timestamp > 120000) {
             recentMessages.delete(signature);
@@ -1245,7 +1298,6 @@ module.exports = async function cmdChat(senderId, args, ctx) {
     }
     
     try {
-        // Message de traitement
         if (args.trim() && !isContinuationRequest(args)) {
             const processingMessage = "🕒...";
             addToMemory(String(senderId), 'assistant', processingMessage);
@@ -1259,10 +1311,8 @@ module.exports = async function cmdChat(senderId, args, ctx) {
             return styledWelcome;
         }
         
-        // Récupérer historique complet
         const conversationHistory = getMemoryContext(String(senderId)).slice(-10);
         
-        // Gestion continuation
         const senderIdStr = String(senderId);
         if (isContinuationRequest(args)) {
             const truncatedData = truncatedMessages.get(senderIdStr);
@@ -1307,7 +1357,6 @@ module.exports = async function cmdChat(senderId, args, ctx) {
             }
         }
         
-        // Détection contact admin
         const contactIntention = detectContactAdminIntention(args);
         if (contactIntention.shouldContact) {
             log.info(`📞 Intention contact admin: ${contactIntention.reason}`);
@@ -1319,70 +1368,40 @@ module.exports = async function cmdChat(senderId, args, ctx) {
             return styledContact;
         }
         
-        // Détection commandes IA (SAUF help qui est intégré au système)
         const intelligentCommand = await detectIntelligentCommands(args, conversationHistory, ctx);
         if (intelligentCommand.shouldExecute) {
-            log.info(`🧠 Commande IA détectée: /${intelligentCommand.command} (${intelligentCommand.confidence})`);
-            log.info(`📝 Raison: ${intelligentCommand.reason}`);
-            log.info(`🎯 Redirection vers processCommand comme si l'user avait tapé /${intelligentCommand.command}`);
+            log.info(`🧠 Commande détectée: /${intelligentCommand.command} (${intelligentCommand.confidence})`);
             
-            // 🔥 NOUVEAU: Rediriger vers processCommand EXACTEMENT comme si l'user avait tapé la commande
-            // Sauvegarder le message original dans la mémoire
             addToMemory(String(senderId), 'user', args);
             
-            // Construire la commande exacte comme si l'user l'avait tapée
-            const simulatedCommand = `/${intelligentCommand.command} ${intelligentCommand.args}`;
-            log.info(`🔄 Simulation commande: "${simulatedCommand}"`);
+            const commandResult = await executeCommandFromChat(senderId, intelligentCommand.command, intelligentCommand.args, ctx);
             
-            // Libérer la requête active pour permettre processCommand de fonctionner
-            activeRequests.delete(senderId);
-            
-            // Appeler processCommand du contexte (celui du server.js)
-            if (ctx.processCommand) {
-                try {
-                    const commandResponse = await ctx.processCommand(senderId, simulatedCommand);
-                    log.info(`✅ Commande /${intelligentCommand.command} exécutée via processCommand`);
-                    
-                    // Ne pas ajouter à la mémoire ici car processCommand le fait déjà
-                    return commandResponse;
-                } catch (error) {
-                    log.error(`❌ Erreur processCommand pour /${intelligentCommand.command}: ${error.message}`);
-                    // Continue vers conversation normale en cas d'erreur
+            if (commandResult.success) {
+                if (typeof commandResult.result === 'object' && commandResult.result.type === 'image') {
+                    return commandResult.result;
                 }
+                
+                const contextualResponse = await generateContextualResponse(args, commandResult.result, intelligentCommand.command, ctx);
+                const styledResponse = parseMarkdown(contextualResponse);
+                
+                addToMemory(String(senderId), 'assistant', styledResponse);
+                return styledResponse;
             } else {
-                log.error(`❌ ctx.processCommand non disponible - impossible d'exécuter la commande`);
+                log.warning(`⚠️ Échec exécution /${intelligentCommand.command}: ${commandResult.error}`);
                 // Continue vers conversation normale
             }
         } else {
             log.debug(`🔍 Aucune commande détectée dans: "${args.substring(0, 50)}..."`);
         }
         
-        // Décision recherche avec mémoire
         const searchDecision = await decideSearchNecessity(args, senderId, conversationHistory, ctx);
         
         let searchResults = null;
         if (searchDecision.needsExternalSearch) {
             log.info(`🔍 Recherche externe: ${searchDecision.reason}`);
-            if (searchDecision.usesConversationMemory) {
-                log.info(`🧠 Requête enrichie: "${searchDecision.searchQuery}"`);
-            }
-            
-            try {
-                searchResults = await performIntelligentSearch(searchDecision.searchQuery, ctx);
-                
-                if (searchResults && searchResults.length > 0) {
-                    log.info(`🔍✅ ${searchResults.length} résultats trouvés`);
-                } else {
-                    log.warning(`⚠️ Aucun résultat - Conversation normale`);
-                    searchResults = null;
-                }
-            } catch (searchError) {
-                log.error(`❌ Erreur recherche: ${searchError.message}`);
-                searchResults = null;
-            }
+            searchResults = await performIntelligentSearch(searchDecision.searchQuery, ctx);
         }
         
-        // Conversation unifiée avec/sans recherche
         return await handleConversationWithFallback(senderId, args, ctx, searchResults);
         
     } finally {
