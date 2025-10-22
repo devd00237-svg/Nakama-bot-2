@@ -739,7 +739,7 @@ VRAIES INTENTIONS DE COMMANDES (confidence >= 0.8):
 ✅ /rank: Demande EXPLICITE de voir ses STATISTIQUES personnelles dans le bot (ex: "mon niveau", "ma progression", "mon rang")
 ✅ /contact: Demande EXPLICITE de CONTACTER les administrateurs (ex: "contacter admin", "envoyer message à Durand")
 ✅ /weather: Demande EXPLICITE de MÉTÉO avec lieu précis (ex: "météo à Paris", "quel temps fait-il à Lyon")
-✅ /echecs: Demande EXPLICITE de JOUER AUX ÉCHECS (ex: "jouons aux échecs", "partie d'échecs", "échecs contre toi", "lance une partie d'échecs")
+✅ /echecs: Toute demande liée aux échecs, incluant démarrer, continuer, abandonner, vérifier état, ou jouer un coup. Exemples: "jouons aux échecs", "nouvelle partie d'échecs", "je veux faire une nouvelle partie d'echec" → command: "echecs", extractedArgs: "nouvelle"; "continuons notre partie" → command: "echecs", extractedArgs: ""; "deplace en e2e4" → command: "echecs", extractedArgs: "e2e4"; "Nf3" → command: "echecs", extractedArgs: "Nf3"; "abandon" → command: "echecs", extractedArgs: "abandon"; "etat" → command: "echecs", extractedArgs: "etat". Si le contexte historique montre une partie en cours (mentions d'échecs ou de coups précédents), interprète TOUTE notation d'échecs (comme e2e4, Nf3, O-O, a7a8=Q) comme un coup pour /echecs avec extractedArgs comme le message complet.
 
 ❌ FAUSSES DÉTECTIONS (NE PAS DÉTECTER):
 - Questions générales mentionnant un mot-clé: "quel chanteur a chanté cette musique" ≠ /music
@@ -747,13 +747,15 @@ VRAIES INTENTIONS DE COMMANDES (confidence >= 0.8):
 - Descriptions: "cette image est belle", "il fait chaud", "niveau débutant"
 - Questions informatives: "c'est quoi la météo", "les clans vikings", "comment ça marche"
 - Demandes d'aide générale: "aide-moi", "j'ai besoin d'aide" ≠ /help (déjà intégré au système)
+- Pour /echecs: Ne détecte pas si pas lié à jouer (ex: "les échecs de la vie" ≠ commande)
 
 RÈGLES STRICTES:
 1. L'utilisateur DOIT vouloir UTILISER une fonctionnalité SPÉCIFIQUE du bot
 2. Il DOIT y avoir une DEMANDE D'ACTION CLAIRE et DIRECTE
-3. Tenir compte du CONTEXTE conversationnel
-4. Confidence MINIMUM 0.8 pour valider (assoupli pour /image si clair)
+3. Tenir compte du CONTEXTE conversationnel (surtout pour /echecs: si partie en cours, priorise détection de coups)
+4. Confidence MINIMUM 0.8 pour valider (assoupli pour /image et /echecs si clair)
 5. En cas de doute → NE PAS détecter de commande
+6. Pour /echecs, extractedArgs doit être le sous-commande ou le coup exact (ex: "nouvelle" pour nouvelle partie, "e2e4" pour coup)
 
 Réponds UNIQUEMENT avec ce JSON:
 {
@@ -839,8 +841,15 @@ function fallbackStrictKeywordDetection(message, log) {
         { command: 'clan', patterns: [/^(rejoindre|creer|mon)\s+clan/, /^bataille\s+de\s+clan/, /^(defier|guerre)\s+/] },
         { command: 'rank', patterns: [/^(mon\s+)?(niveau|rang|stats|progression)/, /^mes\s+(stats|points)/] },
         { command: 'contact', patterns: [/^contacter\s+(admin|administrateur)/, /^signaler\s+probleme/, /^support\s+technique/] },
-        { command: 'weather', patterns: [/^(meteo|quel\s+temps|temperature|previsions)/, /^temps\s+qu.il\s+fait/] },
-        { command: 'echecs', patterns: [/^(joue|partie|echec|echecs)/, /^lance\s+(une\s+)?partie\s+d.echecs/] }
+        { command: 'weather', patterns: [/^(meteo|quel\s+temps|quel temps|temperature|previsions)/, /^temps\s+qu.il\s+fait/] },
+        { command: 'echecs', patterns: [
+            /^(joue|partie|echec|echecs|nouvelle|abandon|etat|status|position)/, 
+            /^lance\s+(une\s+)?partie\s+d.echecs/, 
+            /^continuons\s+(notre\s+)?partie/, 
+            /^deplace\s+(en\s+)?[a-h][1-8][a-h][1-8]/, 
+            /^[pnbrqk]?[a-h]?[1-8]?x?[a-h][1-8](=[pnbrq])?$/i, // Simple regex for SAN
+            /^[a-h][1-8][a-h][1-8]/ // UCI format
+        ] }
     ];
     
     for (const { command, patterns } of strictPatterns) {
@@ -1021,7 +1030,7 @@ CAPACITÉS:
 📞 Contact admin ("contacter admin")
 🔍 Recherche intelligente automatique
 🆘 Guide ("/help")
-♟️ Jeu d'échecs ("joue aux échecs")
+♟️ Jeu d'échecs ("joue aux échecs", "nouvelle partie", coups comme "e2e4")
 
 DIRECTIVES:
 - Langue selon utilisateur
