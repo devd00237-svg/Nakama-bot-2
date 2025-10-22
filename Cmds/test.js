@@ -719,7 +719,7 @@ async function detectIntelligentCommands(message, conversationHistory, ctx) {
             `${msg.role === 'user' ? 'Utilisateur' : 'Bot'}: ${msg.content}`
         ).join('\n');
         
-        const detectionPrompt = `Tu es un système de détection de commandes INTELLIGENT.
+        const detectionPrompt = `Tu es un système de détection de commandes INTELLIGENT avec une sensibilité accrue pour /echecs.
 
 COMMANDES DISPONIBLES: ${commandsList}
 
@@ -739,7 +739,13 @@ VRAIES INTENTIONS DE COMMANDES (confidence >= 0.8):
 ✅ /rank: Demande EXPLICITE de voir ses STATISTIQUES personnelles dans le bot (ex: "mon niveau", "ma progression", "mon rang")
 ✅ /contact: Demande EXPLICITE de CONTACTER les administrateurs (ex: "contacter admin", "envoyer message à Durand")
 ✅ /weather: Demande EXPLICITE de MÉTÉO avec lieu précis (ex: "météo à Paris", "quel temps fait-il à Lyon")
-✅ /echecs: Toute demande liée aux échecs, incluant démarrer, continuer, abandonner, vérifier état, ou jouer un coup. Exemples: "jouons aux échecs", "nouvelle partie d'échecs", "je veux faire une nouvelle partie d'echec" → command: "echecs", extractedArgs: "nouvelle"; "continuons notre partie" → command: "echecs", extractedArgs: ""; "deplace en e2e4" → command: "echecs", extractedArgs: "e2e4"; "Nf3" → command: "echecs", extractedArgs: "Nf3"; "abandon" → command: "echecs", extractedArgs: "abandon"; "etat" → command: "echecs", extractedArgs: "etat". Si le contexte historique montre une partie en cours (mentions d'échecs ou de coups précédents), interprète TOUTE notation d'échecs (comme e2e4, Nf3, O-O, a7a8=Q) comme un coup pour /echecs avec extractedArgs comme le message complet.
+✅ /echecs: Toute demande liée aux échecs, avec détection très forte et prioritaire si contexte de jeu. Inclut démarrer, continuer, abandonner, vérifier état, ou jouer un coup. Exemples: 
+- "jouons aux échecs", "nouvelle partie d'échecs", "je veux faire une nouvelle partie d'echec", "lance une partie" → command: "echecs", extractedArgs: "nouvelle" ou similaire si indiqué, sinon "".
+- "continuons notre partie", "reprenons la partie", "joue ton coup" → command: "echecs", extractedArgs: "" (reprise par défaut).
+- "deplace en e2e4", "e2e4", "Nf3", "O-O", "a7a8=Q" → command: "echecs", extractedArgs: le coup exact (ex: "e2e4").
+- "abandon", "j'abandonne" → command: "echecs", extractedArgs: "abandon".
+- "etat", "position", "status" → command: "echecs", extractedArgs: "etat".
+Si le contexte historique montre une partie en cours (mentions d'échecs, de coups comme e2e4, ou de plateau), interprète PRIORITAIREMENT TOUTE chaîne ressemblant à une notation d'échecs (e2e4, Nf3, O-O, etc.) comme un coup pour /echecs, avec extractedArgs comme le message complet. Sois très sensible: même avec fautes (ex: "e2 e4" → "e2e4").
 
 ❌ FAUSSES DÉTECTIONS (NE PAS DÉTECTER):
 - Questions générales mentionnant un mot-clé: "quel chanteur a chanté cette musique" ≠ /music
@@ -752,8 +758,8 @@ VRAIES INTENTIONS DE COMMANDES (confidence >= 0.8):
 RÈGLES STRICTES:
 1. L'utilisateur DOIT vouloir UTILISER une fonctionnalité SPÉCIFIQUE du bot
 2. Il DOIT y avoir une DEMANDE D'ACTION CLAIRE et DIRECTE
-3. Tenir compte du CONTEXTE conversationnel (surtout pour /echecs: si partie en cours, priorise détection de coups)
-4. Confidence MINIMUM 0.8 pour valider (assoupli pour /image et /echecs si clair)
+3. Tenir compte du CONTEXTE conversationnel (surtout pour /echecs: si partie en cours, priorise détection de coups avec haute confidence)
+4. Confidence MINIMUM 0.8 pour valider (assoupli pour /image et /echecs si clair ou contextuel)
 5. En cas de doute → NE PAS détecter de commande
 6. Pour /echecs, extractedArgs doit être le sous-commande ou le coup exact (ex: "nouvelle" pour nouvelle partie, "e2e4" pour coup). Si pas d'args spécifiques, extractedArgs: ""
 
