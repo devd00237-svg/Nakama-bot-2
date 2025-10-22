@@ -755,7 +755,7 @@ RÈGLES STRICTES:
 3. Tenir compte du CONTEXTE conversationnel (surtout pour /echecs: si partie en cours, priorise détection de coups)
 4. Confidence MINIMUM 0.8 pour valider (assoupli pour /image et /echecs si clair)
 5. En cas de doute → NE PAS détecter de commande
-6. Pour /echecs, extractedArgs doit être le sous-commande ou le coup exact (ex: "nouvelle" pour nouvelle partie, "e2e4" pour coup)
+6. Pour /echecs, extractedArgs doit être le sous-commande ou le coup exact (ex: "nouvelle" pour nouvelle partie, "e2e4" pour coup). Si pas d'args spécifiques, extractedArgs: ""
 
 Réponds UNIQUEMENT avec ce JSON:
 {
@@ -792,6 +792,9 @@ Réponds UNIQUEMENT avec ce JSON:
             if (aiDetection.command) {
                 aiDetection.command = aiDetection.command.replace('/', '');
             }
+            
+            // Handle potential null extractedArgs
+            aiDetection.extractedArgs = aiDetection.extractedArgs || '';
             
             log.debug(`🔍 Résultat détection IA (après fix slash): ${JSON.stringify(aiDetection)}`);
             
@@ -1187,6 +1190,9 @@ function generateContactSuggestion(reason, extractedMessage) {
 
 async function executeCommandFromChat(senderId, commandName, args, ctx) {
     const { log } = ctx;
+    
+    // Handle null or undefined args
+    args = args || '';
     
     try {
         log.info(`⚙️ Exécution de /${commandName} avec args: "${args.substring(0, 100)}..."`);
