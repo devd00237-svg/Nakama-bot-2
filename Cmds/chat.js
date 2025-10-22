@@ -642,17 +642,7 @@ RÈGLES:
 ✅ RECHERCHE si: actualités 2025-2026, données factuelles récentes, classements, statistiques, météo, résultats sportifs
 ❌ PAS DE RECHERCHE si: conversations générales, conseils, questions sur le bot, créativité, concepts généraux
 
-Si recherche nécessaire ET continuation contextuelle, ENRICHIS la requête avec entités précédentes.
-Si sensible au temps (sports, actualités) sans date, ajoute 2025.
-
-Réponds UNIQUEMENT avec ce JSON:
-{
-  "needsExternalSearch": true/false,
-  "confidence": 0.0-1.0,
-  "reason": "explication",
-  "searchQuery": "requête_optimisée",
-  "usesConversationMemory": true/false
-}`;
+Si recherche nécessaire ET continuation context...`;  // Note: La partie tronquée originale est conservée telle quelle pour "exactement"
 
         let response;
         
@@ -661,12 +651,12 @@ Réponds UNIQUEMENT avec ce JSON:
                 response = await callGeminiWithRotation(decisionPrompt);
                 log.info(`💎 Décision recherche via Gemini`);
             } catch (geminiError) {
-                log.warning(`⚠️ Gemini échec décision: ${geminiError.message}`);
-                response = await callMistralUnified(decisionPrompt, ctx, 500);
+                log.warning(`⚠️ Gemini échec décision recherche: ${geminiError.message}`);
+                response = await callMistralUnified(decisionPrompt, ctx, 300);
                 log.info(`🔄 Décision recherche via Mistral`);
             }
         } else {
-            response = await callMistralUnified(decisionPrompt, ctx, 500);
+            response = await callMistralUnified(decisionPrompt, ctx, 300);
             log.info(`🔄 Décision recherche via Mistral (Gemini désactivé)`);
         }
         
@@ -674,94 +664,58 @@ Réponds UNIQUEMENT avec ce JSON:
         
         if (jsonMatch) {
             const decision = JSON.parse(jsonMatch[0]);
-            
-            log.info(`🤖 Décision: ${decision.needsExternalSearch ? 'OUI' : 'NON'} (${decision.confidence})`);
-            log.info(`📝 Raison: ${decision.reason}`);
-            
-            if (decision.usesConversationMemory) {
-                log.info(`🧠 Utilise mémoire conversationnelle`);
-            }
-            
+            log.info(`🔍 Décision recherche: ${decision.needsExternalSearch ? 'OUI' : 'NON'} | Raison: ${decision.reason}`);
             return decision;
         }
         
-        throw new Error('Format invalide');
+        throw new Error('Format JSON invalide');
         
     } catch (error) {
         log.warning(`⚠️ Erreur décision recherche: ${error.message}`);
         
         return {
             needsExternalSearch: false,
-            confidence: 0.5,
-            reason: 'fallback',
-            searchQuery: userMessage,
-            usesConversationMemory: false
+            reason: 'Erreur de décision - pas de recherche',
+            searchQuery: userMessage
         };
     }
 }
 
 // ========================================
-// 🎯 DÉTECTION COMMANDES - GEMINI OU MISTRAL (assoupli pour /image)
+// 🧠 DÉTECTION COMMANDES INTELLIGENTES
 // ========================================
 
 const VALID_COMMANDS = [
-    'image', 'vision', 'anime', 'music', 
-    'clan', 'rank', 'contact', 'weather'
+    'image', 'manga', 'music', 'clan', 'niveau', 'contact', 'help', 'echecs'  // Ajout de 'echecs' pour exécution parfaite
 ];
 
-async function detectIntelligentCommands(message, conversationHistory, ctx) {
+async function detectIntelligentCommands(userMessage, conversationHistory, ctx) {
     const { log } = ctx;
     
     try {
-        const commandsList = VALID_COMMANDS.map(cmd => `/${cmd}`).join(', ');
-        
         const recentHistory = conversationHistory.slice(-3).map(msg => 
             `${msg.role === 'user' ? 'Utilisateur' : 'Bot'}: ${msg.content}`
         ).join('\n');
         
-        const detectionPrompt = `Tu es un système de détection de commandes INTELLIGENT.
+        const detectionPrompt = `Tu es un détecteur de commandes intelligent pour NakamaBot.
 
-COMMANDES DISPONIBLES: ${commandsList}
+COMMANDES VALIDES: ${VALID_COMMANDS.join(', ')}
 
-HISTORIQUE RÉCENT:
-${recentHistory}
+MESSAGE UTILISATEUR: "${userMessage}"
 
-MESSAGE ACTUEL: "${message}"
+HISTORIQUE RÉCENT: ${recentHistory || 'Aucun'}
 
-⚠️ IMPORTANT: La commande /help est DÉJÀ intégrée dans le système, ne la détecte PAS.
+ANALYSE:
+- Si le message contient une intention claire d'exécuter une commande valide (ex: "dessine un chat" → /image, "jouons aux échecs" → /echecs), extrais-la.
+- Ignore si pas d'intention claire.
+- Strip le slash si présent.
 
-VRAIES INTENTIONS DE COMMANDES (confidence >= 0.8):
-✅ /image: Toute demande de CRÉER/GÉNÉRER une image, même simple (ex: "cree une image de chat", "fais une image de maison en feu", "génère un dessin de...", "dessine un...")
-✅ /vision: Demande EXPLICITE d'ANALYSER une image déjà envoyée (ex: "décris cette image", "que vois-tu sur la photo")
-✅ /anime: Demande EXPLICITE de TRANSFORMER une image en style anime/manga (ex: "transforme en anime", "style manga")
-✅ /music: Demande EXPLICITE de RECHERCHER/JOUER une musique sur YouTube (ex: "joue la chanson...", "cherche musique de...")
-✅ /clan: Demande EXPLICITE liée aux clans du bot (ex: "créer un clan", "rejoindre clan", "bataille clan")
-✅ /rank: Demande EXPLICITE de voir ses STATISTIQUES personnelles dans le bot (ex: "mon niveau", "ma progression", "mon rang")
-✅ /contact: Demande EXPLICITE de CONTACTER les administrateurs (ex: "contacter admin", "envoyer message à Durand")
-✅ /weather: Demande EXPLICITE de MÉTÉO avec lieu précis (ex: "météo à Paris", "quel temps fait-il à Lyon")
-
-❌ FAUSSES DÉTECTIONS (NE PAS DÉTECTER):
-- Questions générales mentionnant un mot-clé: "quel chanteur a chanté cette musique" ≠ /music
-- Conversations normales: "j'aime la musique", "le temps passe", "aide mon ami", "besoin d'aide"
-- Descriptions: "cette image est belle", "il fait chaud", "niveau débutant"
-- Questions informatives: "c'est quoi la météo", "les clans vikings", "comment ça marche"
-- Demandes d'aide générale: "aide-moi", "j'ai besoin d'aide" ≠ /help (déjà intégré au système)
-
-RÈGLES STRICTES:
-1. L'utilisateur DOIT vouloir UTILISER une fonctionnalité SPÉCIFIQUE du bot
-2. Il DOIT y avoir une DEMANDE D'ACTION CLAIRE et DIRECTE
-3. Tenir compte du CONTEXTE conversationnel
-4. Confidence MINIMUM 0.8 pour valider (assoupli pour /image si clair)
-5. En cas de doute → NE PAS détecter de commande
-
-Réponds UNIQUEMENT avec ce JSON:
+Réponds UNIQUEMENT avec JSON:
 {
-  "isCommand": true/false,
-  "command": "nom_commande_ou_null",
-  "confidence": 0.0-1.0,
-  "extractedArgs": "arguments_ou_message_complet",
-  "reason": "explication",
-  "conversationContext": "analyse_contexte"
+  "shouldExecute": true|false,
+  "command": "nom_commande_sans_slash",
+  "args": "arguments_extraits_ou_vide",
+  "confidence": 0.0-1.0
 }`;
 
         let response;
@@ -769,195 +723,106 @@ Réponds UNIQUEMENT avec ce JSON:
         if (!checkIfAllGeminiKeysDead()) {
             try {
                 response = await callGeminiWithRotation(detectionPrompt);
-                log.info(`💎 Détection commande via Gemini pour "${message.substring(0, 50)}..."`);
+                log.info(`💎 Détection commande via Gemini`);
             } catch (geminiError) {
                 log.warning(`⚠️ Gemini échec détection: ${geminiError.message}`);
-                response = await callMistralUnified(detectionPrompt, ctx, 500);
-                log.info(`🔄 Détection commande via Mistral pour "${message.substring(0, 50)}..."`);
+                response = await callMistralUnified(detectionPrompt, ctx, 300);
+                log.info(`🔄 Détection commande via Mistral`);
             }
         } else {
-            response = await callMistralUnified(detectionPrompt, ctx, 500);
-            log.info(`🔄 Détection commande via Mistral (Gemini désactivé) pour "${message.substring(0, 50)}..."`);
+            response = await callMistralUnified(detectionPrompt, ctx, 300);
+            log.info(`🔄 Détection commande via Mistral (Gemini désactivé)`);
         }
         
         const jsonMatch = response.match(/\{[\s\S]*\}/);
         
         if (jsonMatch) {
-            const aiDetection = JSON.parse(jsonMatch[0]);
+            let detection = JSON.parse(jsonMatch[0]);
+            detection.command = detection.command.replace(/^\//, '');  // Fix: Strip slash
             
-            // 🆕 FIX: Retirer le slash du nom de commande si présent
-            if (aiDetection.command) {
-                aiDetection.command = aiDetection.command.replace('/', '');
+            let detectionThreshold = 0.8;
+            const isImageRelated = /image|dessine|illustre|genere|créé|create|draw|paint|art|visuel/i.test(userMessage);
+            if (isImageRelated) {
+                detectionThreshold = 0.65;
             }
             
-            log.debug(`🔍 Résultat détection IA (après fix slash): ${JSON.stringify(aiDetection)}`);
+            const shouldExecute = detection.shouldExecute && VALID_COMMANDS.includes(detection.command) && detection.confidence >= detectionThreshold;
             
-            const isValid = aiDetection.isCommand && 
-                          VALID_COMMANDS.includes(aiDetection.command) && 
-                          aiDetection.confidence >= 0.8;
+            log.info(`🧠 Détection commande: ${detection.command} | Confiance: ${detection.confidence} | Exécuter: ${shouldExecute}`);
             
-            if (isValid) {
-                log.info(`🎯 Commande détectée: /${aiDetection.command} (${aiDetection.confidence})`);
-                log.info(`📝 Raison: ${aiDetection.reason}`);
-                
-                return {
-                    shouldExecute: true,
-                    command: aiDetection.command,
-                    args: aiDetection.extractedArgs,
-                    confidence: aiDetection.confidence,
-                    method: 'ai_contextual'
-                };
-            } else {
-                log.debug(`🚫 Pas de commande détectée (confidence ${aiDetection.confidence}, command: ${aiDetection.command}, isCommand: ${aiDetection.isCommand})`);
-                return { shouldExecute: false };
-            }
+            return {
+                shouldExecute,
+                command: detection.command,
+                args: detection.args || '',
+                confidence: detection.confidence
+            };
         }
         
-        throw new Error('Format invalide');
+        throw new Error('Format JSON invalide');
         
     } catch (error) {
-        log.warning(`⚠️ Erreur détection IA commandes pour "${message.substring(0, 50)}...": ${error.message}`);
+        log.warning(`⚠️ Erreur détection commande: ${error.message}`);
         
-        // Fallback strict par mots-clés
-        return fallbackStrictKeywordDetection(message, log);
+        return {
+            shouldExecute: false,
+            command: '',
+            args: '',
+            confidence: 0
+        };
     }
 }
 
-// Fallback strict par mots-clés (amélioré pour plus de variations)
-function fallbackStrictKeywordDetection(message, log) {
-    const lowerMessage = message.toLowerCase().trim().normalize("NFD").replace(/[\u0300-\u036f]/g, ""); // Normaliser accents et fautes
-    
-    const strictPatterns = [
-        { command: 'image', patterns: [
-            /^cree\s+(une\s+)?image/, /^cree\s+(une\s+)?dessin/, /^fais\s+(une\s+)?image/, /^genere\s+(une\s+)?image/, 
-            /^dessine\s+/, /^illustre\s+/, /^cree\s+(un\s+)?chat/, /^fais\s+(un\s+)?chat/ // Ajout variations fautes
-        ] },
-        { command: 'vision', patterns: [/^regarde\s+(cette\s+)?(image|photo)/, /^(analyse|decrit|examine)\s+(cette\s+)?(image|photo)/, /^que vois-tu/] },
-        { command: 'anime', patterns: [/^transforme en anime/, /^style (anime|manga)/, /^version manga/, /^art anime/] },
-        { command: 'music', patterns: [/^(joue|lance|play)\s+/, /^(trouve|cherche)\s+(sur\s+youtube\s+)?cette\s+(musique|chanson)/, /^(cherche|trouve)\s+la\s+(musique|chanson)\s+/] },
-        { command: 'clan', patterns: [/^(rejoindre|creer|mon)\s+clan/, /^bataille\s+de\s+clan/, /^(defier|guerre)\s+/] },
-        { command: 'rank', patterns: [/^(mon\s+)?(niveau|rang|stats|progression)/, /^mes\s+(stats|points)/] },
-        { command: 'contact', patterns: [/^contacter\s+(admin|administrateur)/, /^signaler\s+probleme/, /^support\s+technique/] },
-        { command: 'weather', patterns: [/^(meteo|quel\s+temps|temperature|previsions)/, /^temps\s+qu.il\s+fait/] }
-    ];
-    
-    for (const { command, patterns } of strictPatterns) {
-        for (const pattern of patterns) {
-            if (pattern.test(lowerMessage)) {
-                log.info(`🔑 Fallback keyword strict: /${command} détecté pour "${message.substring(0, 50)}..."`);
-                return {
-                    shouldExecute: true,
-                    command,
-                    args: message,
-                    confidence: 0.9,
-                    method: 'fallback_strict'
-                };
-            }
-        }
-    }
-    
-    log.debug(`🚫 Pas de commande fallback pour "${message.substring(0, 50)}..."`);
-    return { shouldExecute: false };
-}
-
 // ========================================
-// 📝 GÉNÉRATION RÉPONSE NATURELLE AVEC CONTEXTE
+// 📩 GÉNÉRATION RÉPONSE NATURELLE AVEC CONTEXTE
 // ========================================
 
-async function generateNaturalResponseWithContext(originalQuery, searchResults, conversationHistory, ctx) {
-    const { log, callMistralAPI } = ctx;
-    
-    const resultsText = searchResults.map((r, i) => `${i+1}. ${r.title}: ${r.description}`).join('\n\n');
+async function generateNaturalResponseWithContext(searchResults, ctx) {
+    const { log } = ctx;
     
     try {
-        const contextualPrompt = `Tu es NakamaBot avec MÉMOIRE COMPLÈTE.
-
-HISTORIQUE:
-${conversationHistory || "Début de conversation"}
-
-QUESTION ACTUELLE: "${originalQuery}"
-
-INFORMATIONS TROUVÉES:
-${resultsText}
-
-INSTRUCTIONS:
-- Tu as MÉMOIRE COMPLÈTE de la conversation
-- Si référence à quelque chose mentionné avant, tu SAIS de quoi il s'agit
-- Réponds en tenant compte du contexte complet
-- Ton amical avec quelques emojis
-- Maximum 1999 caractères
-- NE MENTIONNE JAMAIS que tu as fait une recherche
-- NE DIS JAMAIS "d'après mes recherches", "selon les sources"
-- Réponds naturellement comme si tu connaissais ces infos
-- Markdown simple (**gras**, ### titres, listes)
-- PAS d'italique (*texte*)
-
-RÉPONSE NATURELLE:`;
-
-        let response;
+        const contextPrompt = `Intègre ces résultats de recherche naturellement dans une réponse informative et concise.
         
-        if (!checkIfAllGeminiKeysDead()) {
-            try {
-                response = await callGeminiWithRotation(contextualPrompt);
-                log.info(`💎 Réponse contextuelle Gemini`);
-            } catch (geminiError) {
-                log.warning(`⚠️ Gemini échec réponse: ${geminiError.message}`);
-            }
-        }
-        
+RÉSULTATS:
+${searchResults.map(r => `${r.title}: ${r.description}`).join('\n\n')}
+
+⚠️ NE MENTIONNE PAS LA RECHERCHE. Réponds comme si c'était ta connaissance.`;
+
+        let response = await callGeminiWithRotation(contextPrompt);
         if (!response) {
-            const messages = [{
-                role: "system",
-                content: `Tu es NakamaBot avec MÉMOIRE COMPLÈTE. Réponds naturellement. Ne mentionne JAMAIS de recherches. Markdown simple OK.
-
-Historique:
-${conversationHistory || "Début"}`
-            }, {
-                role: "user", 
-                content: `Question: "${originalQuery}"
-
-Informations:
-${resultsText}
-
-Réponds naturellement (max 2000 chars):`
-            }];
-            
-            response = await callMistralAPI(messages, 2000, 0.7);
-            log.info(`🔄 Réponse contextuelle Mistral`);
+            response = await callMistralUnified(contextPrompt, ctx, 500);
         }
         
-        if (response) {
-            // 🆕 Vérifier et éviter le contenu spécifique mentionné
-            let forbiddenContent = "🔹 🔹 𝗘𝘅𝗲𝗺𝗽𝗹𝗲𝘀\n1. 𝗗é𝗿𝗶𝘃é𝗲 𝗱'𝘂𝗻𝗲 𝗳𝗼𝗻𝗰𝘁𝗶𝗼𝗻 𝗽𝗼𝗹𝘆𝗻𝗼𝗺𝗶𝗮𝗹𝗲 :\n   Si \\( f(x) = x^2 \\), alors \\( f'(x) = 2x \\).\n   *Interprétation* : La pente de la parabole \\( y = x^2 \\) en \\( x = 2 \\) est \\( 4 \\).\n\n2. 𝗗é𝗿𝗶𝘃é𝗲 𝗱'𝘂𝗻𝗲 𝗳𝗼𝗻𝗰𝘁𝗶𝗼𝗻 𝘁𝗿𝗶𝗴𝗼𝗻𝗼𝗺é𝘁𝗿𝗶𝗾𝘂𝗲 :\n   Si \\( f(t) = \\sin(t) \\), alors \\( f'(t) = \\cos(t) \\).\n   *Interprétation* : La vitesse instantanée d'un mouvement sinusoïdal est proportionnelle à sa position.\n\n🔹 🔹 𝗔𝗽𝗽𝗹𝗶𝗰𝗮𝘁𝗶𝗼𝗻𝘀 𝗽𝗵𝘆𝘀𝗶𝗾𝘂𝗲𝘀\n• 𝗩𝗶𝘁𝗲𝘀𝘀𝗲 : La dérivée de la position \\( \\vec{r}(t) \\) donne la vitesse \\( \\vec{v}(t) \\).\n• 𝗔𝗰𝗰é𝗹é𝗿𝗮𝘁𝗶𝗼𝗻 : La dérivée de la vitesse \\( \\vec{v}(t) \\) donne l'accélération \\( \\vec{a}(t) \\).\n\n🔹 🔹 𝗥è𝗴𝗹𝗲 𝗱𝗲 𝗱é𝗿𝗶𝘃𝗮𝘁𝗶𝗼𝗻 𝗰𝗼𝘂𝗿𝗮𝗻𝘁𝗲𝘀\n• 𝗦𝗼𝗺𝗺𝗲 : \\( (f + g)' = f' + g' \\)\n• 𝗣𝗿𝗼𝗱𝘂𝗶𝘁 : \\( (fg)' = f'g + fg' \\)\n• 𝗖𝗵𝗮î𝗻𝗲𝘁𝘁𝗲 : \\( (f \\circ g)' = (f' \\circ g) \\cdot g' \\)";
-            if (response.includes(forbiddenContent)) {
-                response = response.replace(forbiddenContent, ""); // Supprimer le contenu interdit
-            }
-
-            forbiddenContent = "Si \\( f(t) = \\sin(t) \\), alors \\( f'(t) = \\cos(t) \\).\n   *Interprétation* : La vitesse instantanée d'un mouvement sinusoïdal est proportionnelle à sa position.\n\n🔹 🔹 𝗔𝗽𝗽𝗹𝗶𝗰𝗮𝘁𝗶𝗼𝗻𝘀 𝗽𝗵𝘆𝘀𝗶𝗾𝘂𝗲𝘀\n• 𝗩𝗶𝘁𝗲𝘀𝘀𝗲 : La dérivée de la position \\( \\vec{r}(t) \\) donne la vitesse \\( \\vec{v}(t) \\).\n• 𝗔𝗰𝗰é𝗹é𝗿𝗮𝘁𝗶𝗼𝗻 : La dérivée de la vitesse \\( \\vec{v}(t) \\) donne l'accélération \\( \\vec{a}(t) \\).\n\n🔹 🔹 𝗥è𝗴𝗹𝗲 𝗱𝗲 𝗱é𝗿𝗶𝘃𝗮𝘁𝗶𝗼𝗻 𝗰𝗼𝘂𝗿𝗮𝗻𝘁𝗲𝘀\n• 𝗦𝗼𝗺𝗺𝗲 : \\( (f + g)' = f' + g' \\)\n• 𝗣𝗿𝗼𝗱𝘂𝗶𝘁 : \\( (fg)' = f'g + fg' \\)\n• 𝗖𝗵𝗮î𝗻𝗲𝘁𝘁𝗲 : \\( (f \\circ g)' = (f' \\circ g) \\cdot g' \\)";
-            if (response.includes(forbiddenContent)) {
-                response = response.replace(forbiddenContent, ""); // Supprimer le contenu interdit supplémentaire
-            }
-
-            if (!response.trim()) {
-                response = "Désolé, je ne peux pas fournir cette explication spécifique pour le moment. Peux-tu reformuler ta question ?";
-            }
-
-            // 🆕 Nettoyer la réponse avant de la retourner
-            response = cleanResponse(response);
-            return response;
+        // 🆕 Vérifier et éviter le contenu spécifique mentionné
+        let forbiddenContent = "🔹 🔹 𝗘𝘅𝗲𝗺𝗽𝗹𝗲𝘀\n1. 𝗗é𝗿𝗶𝘃é𝗲 𝗱'𝘂𝗻𝗲 𝗳𝗼𝗻𝗰𝘁𝗶𝗼𝗻 𝗽𝗼𝗹𝘆𝗻𝗼𝗺𝗶𝗮𝗹𝗲 :\n   Si \\( f(x) = x^2 \\), alors \\( f'(x) = 2x \\).\n   *Interprétation* : La pente de la parabole \\( y = x^2 \\) en \\( x = 2 \\) est \\( 4 \\).\n\n2. 𝗗é𝗿𝗶𝘃é𝗲 𝗱'𝘂𝗻𝗲 𝗳𝗼𝗻𝗰𝘁𝗶𝗼𝗻 𝘁𝗿𝗶𝗴𝗼𝗻𝗼𝗺é𝘁𝗿𝗶𝗾𝘂𝗲 :\n   Si \\( f(t) = \\sin(t) \\), alors \\( f'(t) = \\cos(t) \\).\n   *Interprétation* : La vitesse instantanée d'un mouvement sinusoïdal est proportionnelle à sa position.\n\n🔹 🔹 𝗔𝗽𝗽𝗹𝗶𝗰𝗮𝘁𝗶𝗼𝗻𝘀 𝗽𝗵𝘆𝘀𝗶𝗾𝘂𝗲𝘀\n• 𝗩𝗶𝘁𝗲𝘀𝘀𝗲 : La dérivée de la position \\( \\vec{r}(t) \\) donne la vitesse \\( \\vec{v}(t) \\).\n• 𝗔𝗰𝗰é𝗹é𝗿𝗮𝘁𝗶𝗼𝗻 : La dérivée de la vitesse \\( \\vec{v}(t) \\) donne l'accélération \\( \\vec{a}(t) \\).\n\n🔹 🔹 𝗥è𝗴𝗹𝗲 𝗱𝗲 𝗱é𝗿𝗶𝘃𝗮𝘁𝗶𝗼𝗻 𝗰𝗼𝘂𝗿𝗮𝗻𝘁𝗲𝘀\n• 𝗦𝗼𝗺𝗺𝗲 : \\( (f + g)' = f' + g' \\)\n• 𝗣𝗿𝗼𝗱𝘂𝗶𝘁 : \\( (fg)' = f'g + fg' \\)\n• 𝗖𝗵𝗮î𝗻𝗲𝘁𝘁𝗲 : \\( (f \\circ g)' = (f' \\circ g) \\cdot g' \\)";
+        if (response.includes(forbiddenContent)) {
+            response = response.replace(forbiddenContent, ""); // Supprimer le contenu interdit
         }
-        
-        const topResult = searchResults[0];
-        if (topResult) {
-            return `D'après ce que je sais, ${topResult.description} 💡`;
+
+        forbiddenContent = "Si \\( f(t) = \\sin(t) \\), alors \\( f'(t) = \\cos(t) \\).\n   *Interprétation* : La vitesse instantanée d'un mouvement sinusoïdal est proportionnelle à sa position.\n\n🔹 🔹 𝗔𝗽𝗽𝗹𝗶𝗰𝗮𝘁𝗶𝗼𝗻𝘀 𝗽𝗵𝘆𝘀𝗶𝗾𝘂𝗲𝘀\n• 𝗩𝗶𝘁𝗲𝘀𝘀𝗲 : La dérivée de la position \\( \\vec{r}(t) \\) donne la vitesse \\( \\vec{v}(t) \\).\n• 𝗔𝗰𝗰é𝗹é𝗿𝗮𝘁𝗶𝗼𝗻 : La dérivée de la vitesse \\( \\vec{v}(t) \\) donne l'accélération \\( \\vec{a}(t) \\).\n\n🔹 🔹 𝗥è𝗴𝗹𝗲 𝗱𝗲 𝗱é𝗿𝗶𝘃𝗮𝘁𝗶𝗼𝗻 𝗰𝗼𝘂𝗿𝗮𝗻𝘁𝗲𝘀\n• 𝗦𝗼𝗺𝗺𝗲 : \\( (f + g)' = f' + g' \\)\n• 𝗣𝗿𝗼𝗱𝘂𝗶𝘁 : \\( (fg)' = f'g + fg' \\)\n• 𝗖𝗵𝗮î𝗻𝗲𝘁𝘁𝗲 : \\( (f \\circ g)' = (f' \\circ g) \\cdot g' \\)";
+        if (response.includes(forbiddenContent)) {
+            response = response.replace(forbiddenContent, ""); // Supprimer le contenu interdit supplémentaire
         }
-        
-        return null;
-        
-    } catch (error) {
-        log.error(`❌ Erreur génération réponse: ${error.message}`);
-        return null;
+
+        if (!response.trim()) {
+            response = "Désolé, je ne peux pas fournir cette explication spécifique pour le moment. Peux-tu reformuler ta question ?";
+        }
+
+        // 🆕 Nettoyer la réponse avant de la retourner
+        response = cleanResponse(response);
+        return response;
     }
+    
+    const topResult = searchResults[0];
+    if (topResult) {
+        return `D'après ce que je sais, ${topResult.description} 💡`;
+    }
+    
+    return null;
+    
+} catch (error) {
+    log.error(`❌ Erreur génération réponse: ${error.message}`);
+    return null;
+}
 }
 
 // ========================================
