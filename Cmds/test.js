@@ -706,7 +706,7 @@ Réponds UNIQUEMENT avec ce JSON:
 
 const VALID_COMMANDS = [
     'image', 'vision', 'anime', 'music', 
-    'clan', 'rank', 'contact', 'weather'
+    'clan', 'rank', 'contact', 'weather', 'echecs'
 ];
 
 async function detectIntelligentCommands(message, conversationHistory, ctx) {
@@ -739,6 +739,7 @@ VRAIES INTENTIONS DE COMMANDES (confidence >= 0.8):
 ✅ /rank: Demande EXPLICITE de voir ses STATISTIQUES personnelles dans le bot (ex: "mon niveau", "ma progression", "mon rang")
 ✅ /contact: Demande EXPLICITE de CONTACTER les administrateurs (ex: "contacter admin", "envoyer message à Durand")
 ✅ /weather: Demande EXPLICITE de MÉTÉO avec lieu précis (ex: "météo à Paris", "quel temps fait-il à Lyon")
+✅ /echecs: Demande EXPLICITE de JOUER AUX ÉCHECS (ex: "jouons aux échecs", "partie d'échecs", "échecs contre toi", "lance une partie d'échecs")
 
 ❌ FAUSSES DÉTECTIONS (NE PAS DÉTECTER):
 - Questions générales mentionnant un mot-clé: "quel chanteur a chanté cette musique" ≠ /music
@@ -838,7 +839,8 @@ function fallbackStrictKeywordDetection(message, log) {
         { command: 'clan', patterns: [/^(rejoindre|creer|mon)\s+clan/, /^bataille\s+de\s+clan/, /^(defier|guerre)\s+/] },
         { command: 'rank', patterns: [/^(mon\s+)?(niveau|rang|stats|progression)/, /^mes\s+(stats|points)/] },
         { command: 'contact', patterns: [/^contacter\s+(admin|administrateur)/, /^signaler\s+probleme/, /^support\s+technique/] },
-        { command: 'weather', patterns: [/^(meteo|quel\s+temps|temperature|previsions)/, /^temps\s+qu.il\s+fait/] }
+        { command: 'weather', patterns: [/^(meteo|quel\s+temps|temperature|previsions)/, /^temps\s+qu.il\s+fait/] },
+        { command: 'echecs', patterns: [/^(joue|partie|echec|echecs)/, /^lance\s+(une\s+)?partie\s+d.echecs/] }
     ];
     
     for (const { command, patterns } of strictPatterns) {
@@ -1019,6 +1021,7 @@ CAPACITÉS:
 📞 Contact admin ("contacter admin")
 🔍 Recherche intelligente automatique
 🆘 Guide ("/help")
+♟️ Jeu d'échecs ("joue aux échecs")
 
 DIRECTIVES:
 - Langue selon utilisateur
