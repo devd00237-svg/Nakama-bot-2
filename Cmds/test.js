@@ -432,700 +432,328 @@ async function searchWebScraping(query, log) {
         
         const results = [];
         
-        for (const url of sources) {
+        // Limiter à 2 sources pour éviter les timeouts
+        for (const url of sources.slice(0, 2)) {
             try {
                 const response = await axios.get(url, {
-                    headers: { 'User-Agent': SEARCH_CONFIG.webScraping.userAgent },
+                    headers: {
+                        'User-Agent': SEARCH_CONFIG.webScraping.userAgent
+                    },
                     timeout: SEARCH_CONFIG.webScraping.timeout
                 });
                 
                 const $ = cheerio.load(response.data);
                 
-                if (url.includes('news.google.com')) {
-                    $('article').slice(0, 3).each((i, elem) => {
-                        const title = $(elem).find('a').first().text().trim();
-                        const snippet = $(elem).find('p').text().trim();
-                        
-                        if (title && snippet) {
-                            results.push({
-                                title,
-                                description: snippet,
-                                link: 'https://news.google.com',
-                                source: 'google_news'
-                            });
-                        }
-                    });
-                }
+                // Extraction pour Google News
+                $('div[data-nid]').slice(0, 2).each((i, elem) => {
+                    const title = $(elem).find('h3').text().trim();
+                    const snippet = $(elem).find('div[role="heading"]').next().text().trim();
+                    const link = 'https://news.google.com' + $(elem).find('a').attr('href');
+                    
+                    if (title && snippet) {
+                        results.push({
+                            title,
+                            description: snippet,
+                            link: link || 'N/A',
+                            source: 'google_news'
+                        });
+                    }
+                });
                 
-                if (url.includes('yahoo.com')) {
-                    $('.dd.algo').slice(0, 2).each((i, elem) => {
-                        const title = $(elem).find('h3').text().trim();
-                        const snippet = $(elem).find('.compText').text().trim();
-                        
-                        if (title && snippet) {
-                            results.push({
-                                title,
-                                description: snippet,
-                                link: 'N/A',
-                                source: 'yahoo'
-                            });
-                        }
-                    });
-                }
-                
-                if (results.length >= 3) break;
-                
+                // Extraction pour Yahoo
+                $('li.searchCenterMiddle_li').slice(0, 2).each((i, elem) => {
+                    const title = $(elem).find('h3').text().trim();
+                    const snippet = $(elem).find('.compText p').text().trim();
+                    const link = $(elem).find('a').attr('href');
+                    
+                    if (title && snippet) {
+                        results.push({
+                            title,
+                            description: snippet,
+                            link: link || 'N/A',
+                            source: 'yahoo'
+                        });
+                    }
+                });
             } catch (error) {
-                // Continue
+                log.warning(`⚠️ Scraping échec pour ${url}: ${error.message}`);
             }
+            await new Promise(r => setTimeout(r, SEARCH_RETRY_DELAY));
         }
         
         if (results.length > 0) {
             searchCache.set(cacheKey, { results, timestamp: Date.now() });
-            log.info(`🌐 Web Scraping: ${results.length} résultats pour "${query}"`);
+            log.info(`🌐 Scraping: ${results.length} résultats pour "${query}"`);
             return results;
         }
         
         return [];
         
     } catch (error) {
-        log.warning(`⚠️ Web Scraping échec: ${error.message}`);
-        return [];
-    }
-}
-
-async function performIntelligentSearch(query, ctx) {
-    const { log } = ctx;
-    
-    try {
-        if (SEARCH_CONFIG.duckduckgo.enabled) {
-            const ddgResults = await searchDuckDuckGo(query, log);
-            if (ddgResults.length > 0) return ddgResults;
-        }
-        
-        await new Promise(resolve => setTimeout(resolve, 500));
-        
-        if (SEARCH_CONFIG.wikipedia.enabled) {
-            const wikiResults = await searchWikipedia(query, log);
-            if (wikiResults.length > 0) return wikiResults;
-        }
-        
-        await new Promise(resolve => setTimeout(resolve, 500));
-        
-        if (SEARCH_CONFIG.webScraping.enabled) {
-            const scrapeResults = await searchWebScraping(query, log);
-            if (scrapeResults.length > 0) return scrapeResults;
-        }
-        
-        log.warning(`⚠️ Aucun résultat trouvé pour: ${query}`);
-        return [];
-        
-    } catch (error) {
-        log.error(`❌ Erreur recherche combinée: ${error.message}`);
+        log.warning(`⚠️ Scraping global échec: ${error.message}`);
         return [];
     }
 }
 
 // ========================================
-// 🧠 ANALYSE CONTEXTUELLE - GEMINI OU MISTRAL
-// ========================================
-
-async function analyzeConversationContext(senderId, currentMessage, conversationHistory, ctx) {
-    const { log } = ctx;
-    
-    try {
-        const recentHistory = conversationHistory.slice(-5).map(msg => 
-            `${msg.role === 'user' ? 'Utilisateur' : 'Bot'}: ${msg.content}`
-        ).join('\n');
-        
-        const contextPrompt = `Tu es un analyseur de contexte conversationnel ultra-précis.
-
-HISTORIQUE RÉCENT:
-${recentHistory}
-
-MESSAGE ACTUEL: "${currentMessage}"
-
-ANALYSE LE CONTEXTE ET EXTRAIS:
-1. **Sujet principal** de la conversation (ex: "Cameroun football", "météo Paris", "histoire France")
-2. **Entités clés** mentionnées (pays, personnes, lieux, événements, équipes sportives)
-3. **Intention** du message actuel (nouvelle_question, continuation, clarification, changement_sujet)
-4. **Référence contextuelle** : le message actuel fait-il référence à quelque chose mentionné avant ?
-
-Réponds UNIQUEMENT avec ce JSON:
-{
-  "mainTopic": "sujet_principal_complet",
-  "entities": ["entité1", "entité2"],
-  "intent": "nouvelle_question|continuation|clarification|changement_sujet",
-  "contextualReference": "description_de_la_référence_ou_null",
-  "enrichedQuery": "requête_de_recherche_enrichie_avec_contexte"
-}`;
-
-        let response;
-        
-        if (!checkIfAllGeminiKeysDead()) {
-            try {
-                response = await callGeminiWithRotation(contextPrompt);
-                log.info(`💎 Analyse contexte via Gemini`);
-            } catch (geminiError) {
-                log.warning(`⚠️ Gemini échec analyse contexte: ${geminiError.message}`);
-                response = await callMistralUnified(contextPrompt, ctx, 500);
-                log.info(`🔄 Analyse contexte via Mistral`);
-            }
-        } else {
-            response = await callMistralUnified(contextPrompt, ctx, 500);
-            log.info(`🔄 Analyse contexte via Mistral (Gemini désactivé)`);
-        }
-        
-        const jsonMatch = response.match(/\{[\s\S]*\}/);
-        
-        if (jsonMatch) {
-            const context = JSON.parse(jsonMatch[0]);
-            
-            conversationContext.set(senderId, {
-                lastTopic: context.mainTopic,
-                entities: context.entities,
-                intent: context.intent,
-                timestamp: Date.now()
-            });
-            
-            log.info(`🧠 Contexte analysé: ${context.intent} | Sujet: ${context.mainTopic}`);
-            if (context.contextualReference) {
-                log.info(`🔗 Référence contextuelle: ${context.contextualReference}`);
-            }
-            
-            return context;
-        }
-        
-        throw new Error('Format JSON invalide');
-        
-    } catch (error) {
-        log.warning(`⚠️ Erreur analyse contexte: ${error.message}`);
-        
-        return {
-            mainTopic: currentMessage,
-            entities: [],
-            intent: 'nouvelle_question',
-            contextualReference: null,
-            enrichedQuery: currentMessage
-        };
-    }
-}
-
-// ========================================
-// 🤖 DÉCISION IA RECHERCHE - GEMINI OU MISTRAL
+// 🔍 DÉCISION DE RECHERCHE
 // ========================================
 
 async function decideSearchNecessity(userMessage, senderId, conversationHistory, ctx) {
     const { log } = ctx;
     
-    try {
-        const contextAnalysis = await analyzeConversationContext(senderId, userMessage, conversationHistory, ctx);
-        
-        const recentHistory = conversationHistory.slice(-5).map(msg => 
-            `${msg.role === 'user' ? 'Utilisateur' : 'Bot'}: ${msg.content}`
-        ).join('\n');
-        
-        const decisionPrompt = `Tu es un système de décision intelligent pour recherche web.
+    const prompt = `Analyse ce message utilisateur: "${userMessage}"
+    
+Historique récent: ${conversationHistory.map(m => `${m.role}: ${m.content}`).join('\n')}
+    
+Décide si une recherche externe est nécessaire pour répondre précisément et à jour.
+    
+Critères pour OUI:
+- Question factuelle sur actualités récentes (2025+)
+- Demande d'informations précises (prix, dates, stats)
+- Sujet technique/dynamique (tech, finance, science)
+- Demande de sources ou liens
 
-HISTORIQUE RÉCENT:
-${recentHistory}
+Critères pour NON:
+- Conversation générale
+- Opinion personnelle
+- Commandes bot internes
+- Questions hypothétiques
+- Sujets intemporels (maths basiques, histoire ancienne)
 
-MESSAGE ACTUEL: "${userMessage}"
-
-ANALYSE CONTEXTUELLE:
-- Sujet: ${contextAnalysis.mainTopic}
-- Entités: ${contextAnalysis.entities.join(', ')}
-- Intention: ${contextAnalysis.intent}
-- Référence: ${contextAnalysis.contextualReference || 'aucune'}
-
-RÈGLES:
-✅ RECHERCHE si: actualités 2025-2026, données factuelles récentes, classements, statistiques, météo, résultats sportifs
-❌ PAS DE RECHERCHE si: conversations générales, conseils, questions sur le bot, créativité, concepts généraux
-
-Si recherche nécessaire ET continuation contextuelle, ENRICHIS la requête avec entités précédentes.
-Si sensible au temps (sports, actualités) sans date, ajoute 2025.
-
-Réponds UNIQUEMENT avec ce JSON:
+Réponds en JSON:
 {
-  "needsExternalSearch": true/false,
-  "confidence": 0.0-1.0,
-  "reason": "explication",
-  "searchQuery": "requête_optimisée",
-  "usesConversationMemory": true/false
+  "needsExternalSearch": boolean,
+  "reason": string (courte explication),
+  "searchQuery": string (si needsExternalSearch true, requête optimisée, sinon "")
 }`;
 
-        let response;
-        
-        if (!checkIfAllGeminiKeysDead()) {
-            try {
-                response = await callGeminiWithRotation(decisionPrompt);
-                log.info(`💎 Décision recherche via Gemini`);
-            } catch (geminiError) {
-                log.warning(`⚠️ Gemini échec décision: ${geminiError.message}`);
-                response = await callMistralUnified(decisionPrompt, ctx, 500);
-                log.info(`🔄 Décision recherche via Mistral`);
-            }
-        } else {
-            response = await callMistralUnified(decisionPrompt, ctx, 500);
-            log.info(`🔄 Décision recherche via Mistral (Gemini désactivé)`);
+    try {
+        let decisionStr = await callGeminiWithRotation(prompt);
+        if (!decisionStr) {
+            decisionStr = await callMistralUnified(prompt, ctx, 150);
         }
         
-        const jsonMatch = response.match(/\{[\s\S]*\}/);
+        const decision = JSON.parse(decisionStr);
         
-        if (jsonMatch) {
-            const decision = JSON.parse(jsonMatch[0]);
-            
-            log.info(`🤖 Décision: ${decision.needsExternalSearch ? 'OUI' : 'NON'} (${decision.confidence})`);
-            log.info(`📝 Raison: ${decision.reason}`);
-            
-            if (decision.usesConversationMemory) {
-                log.info(`🧠 Utilise mémoire conversationnelle`);
-            }
-            
-            return decision;
-        }
+        log.debug(`🔍 Décision recherche: ${decision.needsExternalSearch ? 'OUI' : 'NON'} - ${decision.reason}`);
         
-        throw new Error('Format invalide');
+        return decision;
         
     } catch (error) {
-        log.warning(`⚠️ Erreur décision recherche: ${error.message}`);
-        
+        log.error(`❌ Erreur décision recherche: ${error.message}`);
         return {
             needsExternalSearch: false,
-            confidence: 0.5,
-            reason: 'fallback',
-            searchQuery: userMessage,
-            usesConversationMemory: false
+            reason: 'Erreur - Pas de recherche',
+            searchQuery: ''
         };
     }
 }
 
 // ========================================
-// 🎯 DÉTECTION COMMANDES - GEMINI OU MISTRAL (assoupli pour /image)
+// 🌐 RECHERCHE INTELLIGENTE
+// ========================================
+
+async function performIntelligentSearch(query, ctx) {
+    const { log } = ctx;
+    
+    if (!query) return null;
+    
+    try {
+        await new Promise(r => setTimeout(r, SEARCH_GLOBAL_COOLDOWN));
+        
+        log.info(`🔍 Recherche intelligente: "${query.substring(0, 50)}..."`);
+        
+        const [ddgResults, wikiResults, scrapeResults] = await Promise.all([
+            searchDuckDuckGo(query, log),
+            searchWikipedia(query, log),
+            searchWebScraping(query, log)
+        ]);
+        
+        const allResults = [...ddgResults, ...wikiResults, ...scrapeResults]
+            .sort((a, b) => b.description.length - a.description.length)
+            .slice(0, 6);
+        
+        if (allResults.length === 0) {
+            log.warning(`⚠️ Aucune résultat pour "${query}"`);
+            return null;
+        }
+        
+        const formattedResults = allResults.map(r => 
+            `Titre: ${r.title}\nDescription: ${r.description}\nSource: ${r.source}\nLien: ${r.link}`
+        ).join('\n\n');
+        
+        return formattedResults;
+        
+    } catch (error) {
+        log.error(`❌ Erreur recherche intelligente: ${error.message}`);
+        return null;
+    }
+}
+
+// ========================================
+// 💬 RÉPONSE NATURELLE AVEC CONTEXTE
+// ========================================
+
+async function generateNaturalResponseWithContext(userMessage, conversationHistory, searchResults, ctx) {
+    const { log } = ctx;
+    
+    const systemPrompt = `Tu es NakamaBot, une assistante IA très gentille, amicale et bienveillante, comme une bonne amie. Nous sommes en 2025. Réponds toujours en français avec une personnalité chaleureuse, positive et encourageante. Utilise des émoticônes mignonnes 💕✨. Limite à 1500 caractères max.
+
+Si résultats recherche fournis, intègre-les naturellement sans lister mécaniquement. Commence par reformuler la question amicalement, donne l'info clé, ajoute ton avis gentil si pertinent, termine par une question pour continuer la conversation.
+
+Markdown simple: **gras**, __souligné__, ~~barré~~, • pour listes. Pas d'italique.
+
+Historique: ${conversationHistory.map(m => `${m.role}: ${m.content}`).join('\n')}
+
+Résultats recherche (si pertinents): ${searchResults || 'Aucun'}`;
+
+    const userPrompt = `Réponds à: "${userMessage}" de manière amicale et naturelle.`;
+
+    try {
+        let response = await callGeminiWithRotation([systemPrompt, userPrompt].join('\n'));
+        if (!response) {
+            response = await callMistralUnified(systemPrompt + '\n' + userPrompt, ctx, 1000);
+        }
+        
+        // 🆕 Nettoyer la réponse
+        response = cleanResponse(response);
+
+        return response;
+        
+    } catch (error) {
+        log.error(`❌ Erreur réponse naturelle: ${error.message}`);
+        return "Oh mince, je suis un peu perdue là... Peux-tu reformuler s'il te plaît ? 💕";
+    }
+}
+
+// ========================================
+// 🔍 DÉTECTION COMMANDES INTELLIGENTES
 // ========================================
 
 const VALID_COMMANDS = [
-    'image', 'vision', 'anime', 'music', 
-    'clan', 'rank', 'contact', 'weather', 'echecs'
+    'help', 'aide', 'image', 'anime', 'vision', 'search', 'recherche', 'chat', 'contact', 'stats', 'clan', 'rank', 'echecs' // Ajouté echecs
 ];
 
-async function detectIntelligentCommands(message, conversationHistory, ctx) {
+async function detectIntelligentCommands(userMessage, conversationHistory, ctx) {
     const { log } = ctx;
     
-    try {
-        const commandsList = VALID_COMMANDS.map(cmd => `/${cmd}`).join(', ');
-        
-        const recentHistory = conversationHistory.slice(-3).map(msg => 
-            `${msg.role === 'user' ? 'Utilisateur' : 'Bot'}: ${msg.content}`
-        ).join('\n');
-        
-        const detectionPrompt = `Tu es un système de détection de commandes INTELLIGENT avec une sensibilité accrue pour /echecs.
+    const prompt = `Analyse ce message utilisateur: "${userMessage}"
 
-COMMANDES DISPONIBLES: ${commandsList}
+Historique récent: ${conversationHistory.map(m => `${m.role}: ${m.content}`).join('\n')}
 
-HISTORIQUE RÉCENT:
-${recentHistory}
+Détecte si c'est une commande implicite pour NakamaBot.
 
-MESSAGE ACTUEL: "${message}"
+Commandes valides: ${VALID_COMMANDS.join(', ')}
 
-⚠️ IMPORTANT: La commande /help est DÉJÀ intégrée dans le système, ne la détecte PAS.
+Règles:
+- Seulement si intention claire (ex: "génère une image de chat" → image)
+- Confidence: 0-1 (1 = certain, 0.7+ pour exécuter)
+- Args: extrait le reste du message
+- Retourne "none" si aucune
 
-VRAIES INTENTIONS DE COMMANDES (confidence >= 0.8):
-✅ /image: Toute demande de CRÉER/GÉNÉRER une image, même simple (ex: "cree une image de chat", "fais une image de maison en feu", "génère un dessin de...", "dessine un...")
-✅ /vision: Demande EXPLICITE d'ANALYSER une image déjà envoyée (ex: "décris cette image", "que vois-tu sur la photo")
-✅ /anime: Demande EXPLICITE de TRANSFORMER une image en style anime/manga (ex: "transforme en anime", "style manga")
-✅ /music: Demande EXPLICITE de RECHERCHER/JOUER une musique sur YouTube (ex: "joue la chanson...", "cherche musique de...")
-✅ /clan: Demande EXPLICITE liée aux clans du bot (ex: "créer un clan", "rejoindre clan", "bataille clan")
-✅ /rank: Demande EXPLICITE de voir ses STATISTIQUES personnelles dans le bot (ex: "mon niveau", "ma progression", "mon rang")
-✅ /contact: Demande EXPLICITE de CONTACTER les administrateurs (ex: "contacter admin", "envoyer message à Durand")
-✅ /weather: Demande EXPLICITE de MÉTÉO avec lieu précis (ex: "météo à Paris", "quel temps fait-il à Lyon")
-✅ /echecs: Toute demande liée aux échecs, avec détection très forte et prioritaire si contexte de jeu. Inclut démarrer, continuer, abandonner, vérifier état, ou jouer un coup. Exemples: 
-- "jouons aux échecs", "nouvelle partie d'échecs", "je veux faire une nouvelle partie d'echec", "lance une partie" → command: "echecs", extractedArgs: "nouvelle" ou similaire si indiqué, sinon "".
-- "continuons notre partie", "reprenons la partie", "joue ton coup" → command: "echecs", extractedArgs: "" (reprise par défaut).
-- "deplace en e2e4", "e2e4", "Nf3", "O-O", "a7a8=Q" → command: "echecs", extractedArgs: le coup exact (ex: "e2e4").
-- "abandon", "j'abandonne" → command: "echecs", extractedArgs: "abandon".
-- "etat", "position", "status" → command: "echecs", extractedArgs: "etat".
-Si le contexte historique montre une partie en cours (mentions d'échecs, de coups comme e2e4, ou de plateau), interprète PRIORITAIREMENT TOUTE chaîne ressemblant à une notation d'échecs (e2e4, Nf3, O-O, etc.) comme un coup pour /echecs, avec extractedArgs comme le message complet. Sois très sensible: même avec fautes (ex: "e2 e4" → "e2e4").
+Pour /image: seuil assoupli (0.6+ si mention "image" ou "génère visuel")
 
-❌ FAUSSES DÉTECTIONS (NE PAS DÉTECTER):
-- Questions générales mentionnant un mot-clé: "quel chanteur a chanté cette musique" ≠ /music
-- Conversations normales: "j'aime la musique", "le temps passe", "aide mon ami", "besoin d'aide"
-- Descriptions: "cette image est belle", "il fait chaud", "niveau débutant"
-- Questions informatives: "c'est quoi la météo", "les clans vikings", "comment ça marche"
-- Demandes d'aide générale: "aide-moi", "j'ai besoin d'aide" ≠ /help (déjà intégré au système)
-- Pour /echecs: Ne détecte pas si pas lié à jouer (ex: "les échecs de la vie" ≠ commande)
-
-RÈGLES STRICTES:
-1. L'utilisateur DOIT vouloir UTILISER une fonctionnalité SPÉCIFIQUE du bot
-2. Il DOIT y avoir une DEMANDE D'ACTION CLAIRE et DIRECTE
-3. Tenir compte du CONTEXTE conversationnel (surtout pour /echecs: si partie en cours, priorise détection de coups avec haute confidence)
-4. Confidence MINIMUM 0.8 pour valider (assoupli pour /image et /echecs si clair ou contextuel)
-5. En cas de doute → NE PAS détecter de commande
-6. Pour /echecs, extractedArgs doit être le sous-commande ou le coup exact (ex: "nouvelle" pour nouvelle partie, "e2e4" pour coup). Si pas d'args spécifiques, extractedArgs: ""
-
-Réponds UNIQUEMENT avec ce JSON:
+Réponds en JSON:
 {
-  "isCommand": true/false,
-  "command": "nom_commande_ou_null",
-  "confidence": 0.0-1.0,
-  "extractedArgs": "arguments_ou_message_complet",
-  "reason": "explication",
-  "conversationContext": "analyse_contexte"
+  "command": string (sans /, ou "none"),
+  "args": string,
+  "confidence": number (0-1),
+  "reason": string
 }`;
 
-        let response;
-        
-        if (!checkIfAllGeminiKeysDead()) {
-            try {
-                response = await callGeminiWithRotation(detectionPrompt);
-                log.info(`💎 Détection commande via Gemini pour "${message.substring(0, 50)}..."`);
-            } catch (geminiError) {
-                log.warning(`⚠️ Gemini échec détection: ${geminiError.message}`);
-                response = await callMistralUnified(detectionPrompt, ctx, 500);
-                log.info(`🔄 Détection commande via Mistral pour "${message.substring(0, 50)}..."`);
-            }
-        } else {
-            response = await callMistralUnified(detectionPrompt, ctx, 500);
-            log.info(`🔄 Détection commande via Mistral (Gemini désactivé) pour "${message.substring(0, 50)}..."`);
-        }
-        
-        const jsonMatch = response.match(/\{[\s\S]*\}/);
-        
-        if (jsonMatch) {
-            const aiDetection = JSON.parse(jsonMatch[0]);
-            
-            // 🆕 FIX: Retirer le slash du nom de commande si présent
-            if (aiDetection.command) {
-                aiDetection.command = aiDetection.command.replace('/', '');
-            }
-            
-            // Handle potential null extractedArgs
-            aiDetection.extractedArgs = aiDetection.extractedArgs || '';
-            
-            log.debug(`🔍 Résultat détection IA (après fix slash): ${JSON.stringify(aiDetection)}`);
-            
-            const isValid = aiDetection.isCommand && 
-                          VALID_COMMANDS.includes(aiDetection.command) && 
-                          aiDetection.confidence >= 0.8;
-            
-            if (isValid) {
-                log.info(`🎯 Commande détectée: /${aiDetection.command} (${aiDetection.confidence})`);
-                log.info(`📝 Raison: ${aiDetection.reason}`);
-                
-                return {
-                    shouldExecute: true,
-                    command: aiDetection.command,
-                    args: aiDetection.extractedArgs,
-                    confidence: aiDetection.confidence,
-                    method: 'ai_contextual'
-                };
-            } else {
-                log.debug(`🚫 Pas de commande détectée (confidence ${aiDetection.confidence}, command: ${aiDetection.command}, isCommand: ${aiDetection.isCommand})`);
-                return { shouldExecute: false };
-            }
-        }
-        
-        throw new Error('Format invalide');
-        
-    } catch (error) {
-        log.warning(`⚠️ Erreur détection IA commandes pour "${message.substring(0, 50)}...": ${error.message}`);
-        
-        // Fallback strict par mots-clés
-        return fallbackStrictKeywordDetection(message, log);
-    }
-}
-
-// Fallback strict par mots-clés (amélioré pour plus de variations)
-function fallbackStrictKeywordDetection(message, log) {
-    const lowerMessage = message.toLowerCase().trim().normalize("NFD").replace(/[\u0300-\u036f]/g, ""); // Normaliser accents et fautes
-    
-    const strictPatterns = [
-        { command: 'image', patterns: [
-            /^cree\s+(une\s+)?image/, /^cree\s+(une\s+)?dessin/, /^fais\s+(une\s+)?image/, /^genere\s+(une\s+)?image/, 
-            /^dessine\s+/, /^illustre\s+/, /^cree\s+(un\s+)?chat/, /^fais\s+(un\s+)?chat/ // Ajout variations fautes
-        ] },
-        { command: 'vision', patterns: [/^regarde\s+(cette\s+)?(image|photo)/, /^(analyse|decrit|examine)\s+(cette\s+)?(image|photo)/, /^que vois-tu/] },
-        { command: 'anime', patterns: [/^transforme en anime/, /^style (anime|manga)/, /^version manga/, /^art anime/] },
-        { command: 'music', patterns: [/^(joue|lance|play)\s+/, /^(trouve|cherche)\s+(sur\s+youtube\s+)?cette\s+(musique|chanson)/, /^(cherche|trouve)\s+la\s+(musique|chanson)\s+/] },
-        { command: 'clan', patterns: [/^(rejoindre|creer|mon)\s+clan/, /^bataille\s+de\s+clan/, /^(defier|guerre)\s+/] },
-        { command: 'rank', patterns: [/^(mon\s+)?(niveau|rang|stats|progression)/, /^mes\s+(stats|points)/] },
-        { command: 'contact', patterns: [/^contacter\s+(admin|administrateur)/, /^signaler\s+probleme/, /^support\s+technique/] },
-        { command: 'weather', patterns: [/^(meteo|quel\s+temps|quel temps|temperature|previsions)/, /^temps\s+qu.il\s+fait/] },
-        { command: 'echecs', patterns: [
-            /^(joue|partie|echec|echecs|nouvelle|abandon|etat|status|position)/, 
-            /^lance\s+(une\s+)?partie\s+d.echecs/, 
-            /^continuons\s+(notre\s+)?partie/, 
-            /^deplace\s+(en\s+)?[a-h][1-8][a-h][1-8]/, 
-            /^[pnbrqk]?[a-h]?[1-8]?x?[a-h][1-8](=[pnbrq])?$/i, // Simple regex for SAN
-            /^[a-h][1-8][a-h][1-8]/ // UCI format
-        ] }
-    ];
-    
-    for (const { command, patterns } of strictPatterns) {
-        for (const pattern of patterns) {
-            if (pattern.test(lowerMessage)) {
-                log.info(`🔑 Fallback keyword strict: /${command} détecté pour "${message.substring(0, 50)}..."`);
-                return {
-                    shouldExecute: true,
-                    command,
-                    args: message,
-                    confidence: 0.9,
-                    method: 'fallback_strict'
-                };
-            }
-        }
-    }
-    
-    log.debug(`🚫 Pas de commande fallback pour "${message.substring(0, 50)}..."`);
-    return { shouldExecute: false };
-}
-
-// ========================================
-// 📝 GÉNÉRATION RÉPONSE NATURELLE AVEC CONTEXTE
-// ========================================
-
-async function generateNaturalResponseWithContext(originalQuery, searchResults, conversationHistory, ctx) {
-    const { log, callMistralAPI } = ctx;
-    
-    const resultsText = searchResults.map((r, i) => `${i+1}. ${r.title}: ${r.description}`).join('\n\n');
-    
     try {
-        const contextualPrompt = `Tu es NakamaBot avec MÉMOIRE COMPLÈTE.
-
-HISTORIQUE:
-${conversationHistory || "Début de conversation"}
-
-QUESTION ACTUELLE: "${originalQuery}"
-
-INFORMATIONS TROUVÉES:
-${resultsText}
-
-INSTRUCTIONS:
-- Tu as MÉMOIRE COMPLÈTE de la conversation
-- Si référence à quelque chose mentionné avant, tu SAIS de quoi il s'agit
-- Réponds en tenant compte du contexte complet
-- Ton amical avec quelques emojis
-- Maximum 1999 caractères
-- NE MENTIONNE JAMAIS que tu as fait une recherche
-- NE DIS JAMAIS "d'après mes recherches", "selon les sources"
-- Réponds naturellement comme si tu connaissais ces infos
-- Markdown simple (**gras**, ### titres, listes)
-- PAS d'italique (*texte*)
-
-RÉPONSE NATURELLE:`;
-
-        let response;
-        
-        if (!checkIfAllGeminiKeysDead()) {
-            try {
-                response = await callGeminiWithRotation(contextualPrompt);
-                log.info(`💎 Réponse contextuelle Gemini`);
-            } catch (geminiError) {
-                log.warning(`⚠️ Gemini échec réponse: ${geminiError.message}`);
-            }
+        let detectionStr = await callGeminiWithRotation(prompt);
+        if (!detectionStr) {
+            detectionStr = await callMistralUnified(prompt, ctx, 200);
         }
         
-        if (!response) {
-            const messages = [{
-                role: "system",
-                content: `Tu es NakamaBot avec MÉMOIRE COMPLÈTE. Réponds naturellement. Ne mentionne JAMAIS de recherches. Markdown simple OK.
-
-Historique:
-${conversationHistory || "Début"}`
-            }, {
-                role: "user", 
-                content: `Question: "${originalQuery}"
-
-Informations:
-${resultsText}
-
-Réponds naturellement (max 2000 chars):`
-            }];
-            
-            response = await callMistralAPI(messages, 2000, 0.7);
-            log.info(`🔄 Réponse contextuelle Mistral`);
-        }
+        const detection = JSON.parse(detectionStr);
         
-        if (response) {
-            // 🆕 Vérifier et éviter le contenu spécifique mentionné
-            let forbiddenContent = "🔹 🔹 𝗘𝘅𝗲𝗺𝗽𝗹𝗲𝘀\n1. 𝗗é𝗿𝗶𝘃é𝗲 𝗱'𝘂𝗻𝗲 𝗳𝗼𝗻𝗰𝘁𝗶𝗼𝗻 𝗽𝗼𝗹𝘆𝗻𝗼𝗺𝗶𝗮𝗹𝗲 :\n   Si \\( f(x) = x^2 \\), alors \\( f'(x) = 2x \\).\n   *Interprétation* : La pente de la parabole \\( y = x^2 \\) en \\( x = 2 \\) est \\( 4 \\).\n\n2. 𝗗é𝗿𝗶𝘃é𝗲 𝗱'𝘂𝗻𝗲 𝗳𝗼𝗻𝗰𝘁𝗶𝗼𝗻 𝘁𝗿𝗶𝗴𝗼𝗻𝗼𝗺é𝘁𝗿𝗶𝗾𝘂𝗲 :\n   Si \\( f(t) = \\sin(t) \\), alors \\( f'(t) = \\cos(t) \\).\n   *Interprétation* : La vitesse instantanée d'un mouvement sinusoïdal est proportionnelle à sa position.\n\n🔹 🔹 𝗔𝗽𝗽𝗹𝗶𝗰𝗮𝘁𝗶𝗼𝗻𝘀 𝗽𝗵𝘆𝘀𝗶𝗾𝘂𝗲𝘀\n• 𝗩𝗶𝘁𝗲𝘀𝘀𝗲 : La dérivée de la position \\( \\vec{r}(t) \\) donne la vitesse \\( \\vec{v}(t) \\).\n• 𝗔𝗰𝗰é𝗹é𝗿𝗮𝘁𝗶𝗼𝗻 : La dérivée de la vitesse \\( \\vec{v}(t) \\) donne l'accélération \\( \\vec{a}(t) \\).\n\n🔹 🔹 𝗥è𝗴𝗹𝗲 𝗱𝗲 𝗱é𝗿𝗶𝘃𝗮𝘁𝗶𝗼𝗻 𝗰𝗼𝘂𝗿𝗮𝗻𝘁𝗲𝘀\n• 𝗦𝗼𝗺𝗺𝗲 : \\( (f + g)' = f' + g' \\)\n• 𝗣𝗿𝗼𝗱𝘂𝗶𝘁 : \\( (fg)' = f'g + fg' \\)\n• 𝗖𝗵𝗮î𝗻𝗲𝘁𝘁𝗲 : \\( (f \\circ g)' = (f' \\circ g) \\cdot g' \\)";
-            if (response.includes(forbiddenContent)) {
-                response = response.replace(forbiddenContent, ""); // Supprimer le contenu interdit
-            }
-
-            forbiddenContent = "Si \\( f(t) = \\sin(t) \\), alors \\( f'(t) = \\cos(t) \\).\n   *Interprétation* : La vitesse instantanée d'un mouvement sinusoïdal est proportionnelle à sa position.\n\n🔹 🔹 𝗔𝗽𝗽𝗹𝗶𝗰𝗮𝘁𝗶𝗼𝗻𝘀 𝗽𝗵𝘆𝘀𝗶𝗾𝘂𝗲𝘀\n• 𝗩𝗶𝘁𝗲𝘀𝘀𝗲 : La dérivée de la position \\( \\vec{r}(t) \\) donne la vitesse \\( \\vec{v}(t) \\).\n• 𝗔𝗰𝗰é𝗹é𝗿𝗮𝘁𝗶𝗼𝗻 : La dérivée de la vitesse \\( \\vec{v}(t) \\) donne l'accélération \\( \\vec{a}(t) \\).\n\n🔹 🔹 𝗥è𝗴𝗹𝗲 𝗱𝗲 𝗱é𝗿𝗶𝘃𝗮𝘁𝗶𝗼𝗻 𝗰𝗼𝘂𝗿𝗮𝗻𝘁𝗲𝘀\n• 𝗦𝗼𝗺𝗺𝗲 : \\( (f + g)' = f' + g' \\)\n• 𝗣𝗿𝗼𝗱𝘂𝗶𝘁 : \\( (fg)' = f'g + fg' \\)\n• 𝗖𝗵𝗮î𝗻𝗲𝘁𝘁𝗲 : \\( (f \\circ g)' = (f' \\circ g) \\cdot g' \\)";
-            if (response.includes(forbiddenContent)) {
-                response = response.replace(forbiddenContent, ""); // Supprimer le contenu interdit supplémentaire
-            }
-
-            if (!response.trim()) {
-                response = "Désolé, je ne peux pas fournir cette explication spécifique pour le moment. Peux-tu reformuler ta question ?";
-            }
-
-            // 🆕 Nettoyer la réponse avant de la retourner
-            response = cleanResponse(response);
-            return response;
-        }
+        // Fix: Strip slash if present
+        detection.command = detection.command.replace('/', '').trim();
         
-        const topResult = searchResults[0];
-        if (topResult) {
-            return `D'après ce que je sais, ${topResult.description} 💡`;
-        }
+        const threshold = detection.command === 'image' ? 0.6 : 0.7;
         
-        return null;
+        const shouldExecute = detection.command !== 'none' && 
+                              VALID_COMMANDS.includes(detection.command) && 
+                              detection.confidence >= threshold;
+        
+        log.info(`🧠 Détection commande: ${detection.command} (conf: ${detection.confidence}) - Execute: ${shouldExecute}`);
+        
+        return {
+            shouldExecute,
+            command: detection.command,
+            args: detection.args || '',
+            confidence: detection.confidence,
+            reason: detection.reason
+        };
         
     } catch (error) {
-        log.error(`❌ Erreur génération réponse: ${error.message}`);
-        return null;
+        log.error(`❌ Erreur détection commande: ${error.message}`);
+        return {
+            shouldExecute: false,
+            command: 'none',
+            args: '',
+            confidence: 0,
+            reason: 'Erreur détection'
+        };
     }
 }
 
 // ========================================
-// 💬 CONVERSATION UNIFIÉE - GEMINI OU MISTRAL
+// 🔄 CONVERSATION AVEC FALLBACK
 // ========================================
 
 async function handleConversationWithFallback(senderId, args, ctx, searchResults = null) {
-    const { addToMemory, getMemoryContext, callMistralAPI, log, 
-            splitMessageIntoChunks, truncatedMessages } = ctx;
+    const { addToMemory, getMemoryContext, log, truncatedMessages, splitMessageIntoChunks } = ctx;
     
-    const context = getMemoryContext(String(senderId)).slice(-8);
-    const messageCount = context.filter(msg => msg.role === 'user').length;
-    
-    const now = new Date();
-    const dateTime = now.toLocaleString('fr-FR', { 
-        weekday: 'long', 
-        year: 'numeric', 
-        month: 'long', 
-        day: 'numeric', 
-        hour: '2-digit', 
-        minute: '2-digit',
-        timeZone: 'Europe/Paris'
-    });
-    
-    let conversationHistory = "";
-    if (context.length > 0) {
-        conversationHistory = context.map(msg => 
-            `${msg.role === 'user' ? 'Utilisateur' : 'Assistant'}: ${msg.content}`
-        ).join('\n') + '\n';
-    }
-    
-    let searchContext = "";
-    if (searchResults && searchResults.length > 0) {
-        searchContext = `\n\n🔍 INFORMATIONS RÉCENTES DISPONIBLES (utilise-les naturellement):
-${searchResults.map((result, index) => 
-    `${index + 1}. ${result.title}: ${result.description}`
-).join('\n\n')}
-
-⚠️ IMPORTANT: Ne mentionne JAMAIS de recherche. Intègre naturellement.`;
-    }
-    
-    const systemPrompt = `Tu es NakamaBot, IA conversationnelle avancée avec MÉMOIRE CONTEXTUELLE créée par Durand et Cécile.
-
-CONTEXTE TEMPOREL: ${dateTime}
-
-PERSONNALITÉ:
-- Empathique, créative, intuitive avec MÉMOIRE COMPLÈTE
-- Tu te souviens de TOUT dans l'historique
-- Si référence à quelque chose mentionné avant, tu SAIS de quoi il parle
-- Pédagogue naturelle
-
-CAPACITÉS:
-🎨 Création images ("dessine-moi...")
-👁️ Analyse images ("regarde cette image")
-🌸 Transformation anime ("style manga")
-🎵 Recherche musicale ("joue...")
-🛡️ Système clans ("clan")
-📊 Progression ("mon niveau")
-📞 Contact admin ("contacter admin")
-🔍 Recherche intelligente automatique
-🆘 Guide ("/help")
-♟️ Jeu d'échecs ("joue aux échecs", "nouvelle partie", coups comme "e2e4")
-
-DIRECTIVES:
-- Langue selon utilisateur
-- Interdiction formelle de donnees tes details techniques toujours Demander de demander a tes createurs
-- Maximum 1999 caractères
-- Quelques emojis avec parcimonie
-- Évite répétitions
-- ${messageCount >= 5 ? 'Suggère /help si pertinent' : ''}
-- Questions techniques: "Demande à Durand ou Cécile !"
-- Problèmes graves: recommande /contact
-- Markdown simple (**gras**, ### titres, listes)
-- PAS d'italique
-- Evite d'envoyer ⏱... Donc de te repeter 
-- UTILISE MÉMOIRE: si "et lui?", "combien?", tu sais grâce à l'historique
-- Si infos récentes disponibles, intègre naturellement SANS dire "j'ai trouvé"
-
-HISTORIQUE COMPLET:
-${conversationHistory || 'Début de conversation'}
-${searchContext}
-
-Utilisateur: ${args}`;
-
     const senderIdStr = String(senderId);
-
+    const conversationHistory = getMemoryContext(senderIdStr).slice(-8);
+    
     try {
         let response;
-        if (!checkIfAllGeminiKeysDead()) {
-            response = await callGeminiWithRotation(systemPrompt);
-            if (response && response.trim()) {
-                log.info(`💎 Gemini réponse${searchResults ? ' (+ recherche)' : ''}`);
-            }
+        
+        try {
+            response = await generateNaturalResponseWithContext(args, conversationHistory, searchResults, ctx);
+        } catch (error) {
+            log.warning(`⚠️ Gemini échoué, fallback Mistral: ${error.message}`);
+            response = await callMistralUnified(
+                `Réponds amicalement à: "${args}"\nHistorique: ${conversationHistory.map(m => m.content).join('\n')}\nRecherche: ${searchResults || 'Aucune'}`,
+                ctx,
+                800
+            );
         }
         
         if (!response) {
-            const messages = [{ role: "system", content: systemPrompt }];
-            messages.push(...context);
-            messages.push({ role: "user", content: args });
-            
-            response = await callMistralAPI(messages, 2000, 0.75);
-            log.info(`🔄 Mistral réponse${searchResults ? ' (+ recherche)' : ''}`);
+            throw new Error('Aucune réponse des IA');
         }
         
-        if (response) {
-            // 🆕 Vérifier et éviter le contenu spécifique mentionné
-            let forbiddenContent = "🔹 🔹 𝗘𝘅𝗲𝗺𝗽𝗹𝗲𝘀\n1. 𝗗é𝗿𝗶𝘃é𝗲 𝗱'𝘂𝗻𝗲 𝗳𝗼𝗻𝗰𝘁𝗶𝗼𝗻 𝗽𝗼𝗹𝘆𝗻𝗼𝗺𝗶𝗮𝗹𝗲 :\n   Si \\( f(x) = x^2 \\), alors \\( f'(x) = 2x \\).\n   *Interprétation* : La pente de la parabole \\( y = x^2 \\) en \\( x = 2 \\) est \\( 4 \\).\n\n2. 𝗗é𝗿𝗶𝘃é𝗲 𝗱'𝘂𝗻𝗲 𝗳𝗼𝗻𝗰𝘁𝗶𝗼𝗻 𝘁𝗿𝗶𝗴𝗼𝗻𝗼𝗺é𝘁𝗿𝗶𝗾𝘂𝗲 :\n   Si \\( f(t) = \\sin(t) \\), alors \\( f'(t) = \\cos(t) \\).\n   *Interprétation* : La vitesse instantanée d'un mouvement sinusoïdal est proportionnelle à sa position.\n\n🔹 🔹 𝗔𝗽𝗽𝗹𝗶𝗰𝗮𝘁𝗶𝗼𝗻𝘀 𝗽𝗵𝘆𝘀𝗶𝗾𝘂𝗲𝘀\n• 𝗩𝗶𝘁𝗲𝘀𝘀𝗲 : La dérivée de la position \\( \\vec{r}(t) \\) donne la vitesse \\( \\vec{v}(t) \\).\n• 𝗔𝗰𝗰é𝗹é𝗿𝗮𝘁𝗶𝗼𝗻 : La dérivée de la vitesse \\( \\vec{v}(t) \\) donne l'accélération \\( \\vec{a}(t) \\).\n\n🔹 🔹 𝗥è𝗴𝗹𝗲 𝗱𝗲 𝗱é𝗿𝗶𝘃𝗮𝘁𝗶𝗼𝗻 𝗰𝗼𝘂𝗿𝗮𝗻𝘁𝗲𝘀\n• 𝗦𝗼𝗺𝗺𝗲 : \\( (f + g)' = f' + g' \\)\n• 𝗣𝗿𝗼𝗱𝘂𝗶𝘁 : \\( (fg)' = f'g + fg' \\)\n• 𝗖𝗵𝗮î𝗻𝗲𝘁𝘁𝗲 : \\( (f \\circ g)' = (f' \\circ g) \\cdot g' \\)";
-            if (response.includes(forbiddenContent)) {
-                response = response.replace(forbiddenContent, ""); // Supprimer le contenu interdit
-            }
-
-            forbiddenContent = "Si \\( f(t) = \\sin(t) \\), alors \\( f'(t) = \\cos(t) \\).\n   *Interprétation* : La vitesse instantanée d'un mouvement sinusoïdal est proportionnelle à sa position.\n\n🔹 🔹 𝗔𝗽𝗽𝗹𝗶𝗰𝗮𝘁𝗶𝗼𝗻𝘀 𝗽𝗵𝘆𝘀𝗶𝗾𝘂𝗲𝘀\n• 𝗩𝗶𝘁𝗲𝘀𝘀𝗲 : La dérivée de la position \\( \\vec{r}(t) \\) donne la vitesse \\( \\vec{v}(t) \\).\n• 𝗔𝗰𝗰é𝗹é𝗿𝗮𝘁𝗶𝗼𝗻 : La dérivée de la vitesse \\( \\vec{v}(t) \\) donne l'accélération \\( \\vec{a}(t) \\).\n\n🔹 🔹 𝗥è𝗴𝗹𝗲 𝗱𝗲 𝗱é𝗿𝗶𝘃𝗮𝘁𝗶𝗼𝗻 𝗰𝗼𝘂𝗿𝗮𝗻𝘁𝗲𝘀\n• 𝗦𝗼𝗺𝗺𝗲 : \\( (f + g)' = f' + g' \\)\n• 𝗣𝗿𝗼𝗱𝘂𝗶𝘁 : \\( (fg)' = f'g + fg' \\)\n• 𝗖𝗵𝗮î𝗻𝗲𝘁𝘁𝗲 : \\( (f \\circ g)' = (f' \\circ g) \\cdot g' \\)";
-            if (response.includes(forbiddenContent)) {
-                response = response.replace(forbiddenContent, ""); // Supprimer le contenu interdit supplémentaire
-            }
-
-            if (!response.trim()) {
-                response = "Désolé, je ne peux pas fournir cette explication spécifique pour le moment. Peux-tu reformuler ta question ?";
-            }
-
-            // 🆕 Nettoyer la réponse avant de la styliser
-            response = cleanResponse(response);
-            const styledResponse = parseMarkdown(response);
+        const styledResponse = parseMarkdown(response);
+        
+        // 🆕 Gestion troncature synchronisée
+        const chunks = splitMessageIntoChunks(styledResponse, 2000);
+        
+        if (chunks.length > 0) {
+            const firstChunk = chunks[0];
             
-            if (styledResponse.length > 2000) {
-                const chunks = splitMessageIntoChunks(styledResponse, 2000);
-                const firstChunk = chunks[0];
+            if (chunks.length > 1) {
+                truncatedMessages.set(senderIdStr, {
+                    fullMessage: styledResponse,
+                    lastSentPart: firstChunk,
+                    timestamp: new Date().toISOString()
+                });
                 
-                if (chunks.length > 1) {
-                    truncatedMessages.set(senderIdStr, {
-                        fullMessage: styledResponse,
-                        lastSentPart: firstChunk,
-                        timestamp: new Date().toISOString()
-                    });
-                    
-                    const truncatedResponse = firstChunk + "\n\n📝 *Tape \"continue\" pour la suite...*";
-                    addToMemory(senderIdStr, 'user', args);
-                    addToMemory(senderIdStr, 'assistant', truncatedResponse);
-                    return truncatedResponse;
-                }
+                const truncatedResponse = firstChunk + "\n\n📝 *Tape \"continue\" pour la suite...*";
+                addToMemory(senderIdStr, 'user', args);
+                addToMemory(senderIdStr, 'assistant', truncatedResponse);
+                return truncatedResponse;
             }
-            
-            addToMemory(senderIdStr, 'user', args);
-            addToMemory(senderIdStr, 'assistant', styledResponse);
-            return styledResponse;
         }
         
-        throw new Error('Toutes les IA ont échoué');
+        addToMemory(senderIdStr, 'user', args);
+        addToMemory(senderIdStr, 'assistant', styledResponse);
+        return styledResponse;
         
     } catch (error) {
         log.error(`❌ Erreur conversation: ${error.message}`);
@@ -1196,9 +824,6 @@ function generateContactSuggestion(reason, extractedMessage) {
 
 async function executeCommandFromChat(senderId, commandName, args, ctx) {
     const { log } = ctx;
-    
-    // Handle null or undefined args
-    args = args || '';
     
     try {
         log.info(`⚙️ Exécution de /${commandName} avec args: "${args.substring(0, 100)}..."`);
