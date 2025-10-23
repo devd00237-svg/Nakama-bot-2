@@ -10,6 +10,7 @@
  * + Logs détaillés pour détection et exécution
  * + Fix: Strip slash from command name in AI detection
  * + Intégration parfaite pour exécution de commandes comme /echecs avec tous les paramètres
+ * + CORRECTION MAJEURE: Détection améliorée des arguments pour /echecs moi, /echecs toi, etc.
  * @param {string} senderId - ID de l'utilisateur
  * @param {string} args - Message de conversation
  * @param {object} ctx - Contexte partagé du bot 
@@ -159,7 +160,6 @@ function parseMarkdown(text) {
     
     // 🆕 Gérer les expressions mathématiques display \[ ... \]
     parsed = parsed.replace(/\\\[([\s\S]*?)\\\]/g, (match, content) => `\n${parseLatexMath(content)}\n`);
-
     return parsed;
 }
 
@@ -547,6 +547,7 @@ ${recentHistory}
 MESSAGE ACTUEL: "${currentMessage}"
 
 ANALYSE LE CONTEXTE ET EXTRAIS:
+
 1. **Sujet principal** de la conversation (ex: "Cameroun football", "météo Paris", "histoire France")
 2. **Entités clés** mentionnées (pays, personnes, lieux, événements, équipes sportives)
 3. **Intention** du message actuel (nouvelle_question, continuation, clarification, changement_sujet)
@@ -643,7 +644,14 @@ RÈGLES:
 ✅ RECHERCHE si: actualités 2025-2026, données factuelles récentes, classements, statistiques, météo, résultats sportifs
 ❌ PAS DE RECHERCHE si: conversations générales, conseils, questions sur le bot, créativité, concepts généraux
 
-Si recherche nécessaire ET continuation contextu...`;
+Si recherche nécessaire ET continuation contextuelle, enrichis la requête avec le contexte.
+
+Réponds UNIQUEMENT avec ce JSON:
+{
+  "needsExternalSearch": true/false,
+  "searchQuery": "requête_optimisée_ou_vide",
+  "reason": "explication_courte"
+}`;
 
         let response;
         
@@ -677,18 +685,114 @@ Si recherche nécessaire ET continuation contextu...`;
 }
 
 // ========================================
-// 🔍 DÉTECTION COMMANDES INTELLIGENTES
+// 🔍 DÉTECTION COMMANDES INTELLIGENTES - VERSION AMÉLIORÉE
 // ========================================
 
 const VALID_COMMANDS = [
     'image', 'anime', 'music', 'clan', 'niveau', 'contact', 'help', 'echecs'
-    // Ajout de 'echecs' pour détection et exécution parfaite
 ];
+
+// 🆕 DÉTECTION DIRECTE POUR /ECHECS AVEC REGEX
+function detectDirectChessCommand(userMessage) {
+    const message = userMessage.toLowerCase().trim();
+    
+    // Patterns pour détecter /echecs avec arguments
+    const chessPatterns = [
+        // Commandes directes avec slash
+        /^\/echecs?\s+(.*)/i,
+        // Commandes sans slash mais explicites
+        /^echecs?\s+(.*)/i,
+        // Phrases naturelles pour échecs
+        /(?:joue|jouer|partie|jeu)\s+(?:aux\s+)?(?:echecs?|échecs?)\s+(.*)/i,
+        /(?:nouvelle|commencer|débuter)\s+partie\s+(?:d')?(?:echecs?|échecs?)\s*(.*)/i,
+        // Réponses courtes après une partie d'échecs en cours
+        /^(moi|toi|nouvelle?|nouvel|etat|état|statut|abandon|quitter|help|aide)$/i
+    ];
+    
+    for (const pattern of chessPatterns) {
+        const match = message.match(pattern);
+        if (match) {
+            let args = match[1] ? match[1].trim() : '';
+            
+            // Si c'est juste un mot simple, c'est probablement un argument pour échecs
+            if (!args && /^(moi|toi|nouvelle?|nouvel|etat|état|statut|abandon|quitter|help|aide)$/i.test(message)) {
+                args = message;
+            }
+            
+            return {
+                shouldExecute: true,
+                command: 'echecs',
+                args: args,
+                confidence: 'high',
+                detectionMethod: 'direct_regex'
+            };
+        }
+    }
+    
+    return null;
+}
+
+// 🆕 DÉTECTION CONTEXTUELLE POUR ÉCHECS
+function detectContextualChessCommand(userMessage, conversationHistory) {
+    const message = userMessage.toLowerCase().trim();
+    
+    // Vérifier si on est dans un contexte d'échecs (derniers messages)
+    const recentMessages = conversationHistory.slice(-3);
+    const hasChessContext = recentMessages.some(msg => 
+        msg.content && (
+            msg.content.includes('échecs') || 
+            msg.content.includes('echecs') ||
+            msg.content.includes('♟️') ||
+            msg.content.includes('partie d\'échecs')
+        )
+    );
+    
+    if (hasChessContext) {
+        // Dans un contexte d'échecs, certains mots courts sont probablement des commandes
+        const contextualPatterns = [
+            /^(moi|toi|je\s+commence|tu\s+commences)$/i,
+            /^(nouvelle?|recommencer|restart)$/i,
+            /^(etat|état|statut|position|plateau)$/i,
+            /^(abandon|quitter|stop|arrêt)$/i,
+            /^([a-h][1-8]|[a-h][1-8][a-h][1-8])$/i, // Coups d'échecs
+            /^(help|aide|\?)$/i
+        ];
+        
+        for (const pattern of contextualPatterns) {
+            if (pattern.test(message)) {
+                return {
+                    shouldExecute: true,
+                    command: 'echecs',
+                    args: message,
+                    confidence: 'high',
+                    detectionMethod: 'contextual'
+                };
+            }
+        }
+    }
+    
+    return null;
+}
 
 async function detectIntelligentCommands(userMessage, conversationHistory, ctx) {
     const { log } = ctx;
     
     try {
+        // 🆕 PRIORITÉ 1: Détection directe pour échecs
+        const directChess = detectDirectChessCommand(userMessage);
+        if (directChess) {
+            log.info(`♟️ Commande échecs détectée directement: "${directChess.args}"`);
+            return directChess;
+        }
+        
+        // 🆕 PRIORITÉ 2: Détection contextuelle pour échecs
+        const contextualChess = detectContextualChessCommand(userMessage, conversationHistory);
+        if (contextualChess) {
+            log.info(`♟️ Commande échecs détectée contextuellement: "${contextualChess.args}"`);
+            return contextualChess;
+        }
+        
+        // PRIORITÉ 3: Détection IA pour autres commandes
         const recentHistory = conversationHistory.slice(-3).map(msg => 
             `${msg.role === 'user' ? 'Utilisateur' : 'Bot'}: ${msg.content}`
         ).join('\n');
@@ -705,8 +809,8 @@ COMMANDES VALIDES: ${VALID_COMMANDS.join(', ')}
 RÈGLES:
 - Détecte SEULEMENT si le message demande EXPLICITEMENT une commande (ex: "dessine un chat" → image)
 - Seuil assoupli pour /image: si "dessine", "génère image", etc.
+- Pour /echecs: IGNORE (géré séparément)
 - Si commande détectée, extrais les args exacts
-- Pour /echecs, détecte "joue aux échecs", "partie d'échecs" avec args comme "nouvelle", "etat", etc.
 - Confiance: high/medium/low
 - Commande sans slash
 
@@ -742,7 +846,8 @@ Réponds UNIQUEMENT avec ce JSON:
             // Strip slash if present
             detection.command = detection.command.replace('/', '').trim();
             
-            if (VALID_COMMANDS.includes(detection.command)) {
+            if (VALID_COMMANDS.includes(detection.command) && detection.command !== 'echecs') {
+                detection.detectionMethod = 'ai';
                 return detection;
             }
         }
@@ -816,7 +921,7 @@ async function executeCommandFromChat(senderId, commandName, args, ctx) {
     const { log } = ctx;
     
     try {
-        log.info(`⚙️ Exécution de /${commandName} avec args: "${args.substring(0, 100)}..."`);
+        log.info(`⚙️ Exécution de /${commandName} avec args: "${args}"`);
         
         const COMMANDS = global.COMMANDS || new Map();
         
@@ -867,7 +972,6 @@ async function generateContextualResponse(originalMessage, commandResult, comman
     
     try {
         const contextPrompt = `L'utilisateur a dit: "${originalMessage}"
-
 La commande /${commandName} a retourné: "${commandResult}"
 
 Réponds naturellement et amicalement pour présenter ce résultat (max 400 chars). Markdown simple OK (**gras**, listes), pas d'italique.`;
@@ -882,7 +986,6 @@ Réponds naturellement et amicalement pour présenter ce résultat (max 400 char
         
         // 🆕 Nettoyer la réponse
         response = cleanResponse(response);
-
         return response || commandResult;
         
     } catch (error) {
@@ -915,16 +1018,13 @@ async function generateNaturalResponseWithContext(userMessage, searchResults, ct
         if (response.includes(forbiddenContent)) {
             response = response.replace(forbiddenContent, "");
         }
-
         forbiddenContent = "Si \\( f(t) = \\sin(t) \\), alors \\( f'(t) = \\cos(t) \\).\n   *Interprétation* : La vitesse instantanée d'un mouvement sinusoïdal est proportionnelle à sa position.\n\n🔹 🔹 𝗔𝗽𝗽𝗹𝗶𝗰𝗮𝘁𝗶𝗼𝗻𝘀 𝗽𝗵𝘆𝘀𝗶𝗾𝘂𝗲𝘀\n• 𝗩𝗶𝘁𝗲𝘀𝘀𝗲 : La dérivée de la position \\( \\vec{r}(t) \\) donne la vitesse \\( \\vec{v}(t) \\).\n• 𝗔𝗰𝗰é𝗹é𝗿𝗮𝘁𝗶𝗼𝗻 : La dérivée de la vitesse \\( \\vec{v}(t) \\) donne l'accélération \\( \\vec{a}(t) \\).\n\n🔹 🔹 𝗥è𝗴𝗹𝗲 𝗱𝗲 𝗱é𝗿𝗶𝘃𝗮𝘁𝗶𝗼𝗻 𝗰𝗼𝘂𝗿𝗮𝗻𝘁𝗲𝘀\n• 𝗦𝗼𝗺𝗺𝗲 : \\( (f + g)' = f' + g' \\)\n• 𝗣𝗿𝗼𝗱𝘂𝗶𝘁 : \\( (fg)' = f'g + fg' \\)\n• 𝗖𝗵𝗮î𝗻𝗲𝘁𝘁𝗲 : \\( (f \\circ g)' = (f' \\circ g) \\cdot g' \\)";
         if (response.includes(forbiddenContent)) {
             response = response.replace(forbiddenContent, "");
         }
-
         if (!response.trim()) {
             response = "Désolé, je ne peux pas fournir cette explication spécifique pour le moment. Peux-tu reformuler ta question ?";
         }
-
         // 🆕 Nettoyer la réponse avant de la retourner
         response = cleanResponse(response);
         return response;
@@ -941,10 +1041,10 @@ async function generateNaturalResponseWithContext(userMessage, searchResults, ct
 async function handleConversationWithFallback(senderId, args, ctx, searchResults = null) {
     const { addToMemory, getMemoryContext, callMistralAPI, log, 
             splitMessageIntoChunks, truncatedMessages } = ctx;
-    
+
     const context = getMemoryContext(String(senderId)).slice(-8);
     const messageCount = context.filter(msg => msg.role === 'user').length;
-    
+
     const now = new Date();
     const dateTime = now.toLocaleString('fr-FR', { 
         weekday: 'long', 
@@ -955,14 +1055,14 @@ async function handleConversationWithFallback(senderId, args, ctx, searchResults
         minute: '2-digit',
         timeZone: 'Europe/Paris'
     });
-    
+
     let conversationHistory = "";
     if (context.length > 0) {
         conversationHistory = context.map(msg => 
             `${msg.role === 'user' ? 'Utilisateur' : 'Assistant'}: ${msg.content}`
         ).join('\n') + '\n';
     }
-    
+
     let searchContext = "";
     if (searchResults && searchResults.length > 0) {
         searchContext = `\n\n🔍 INFORMATIONS RÉCENTES DISPONIBLES (utilise-les naturellement):
@@ -972,7 +1072,7 @@ ${searchResults.map((result, index) =>
 
 ⚠️ IMPORTANT: Ne mentionne JAMAIS de recherche. Intègre naturellement.`;
     }
-    
+
     const systemPrompt = `Tu es NakamaBot, IA conversationnelle avancée avec MÉMOIRE CONTEXTUELLE créée par Durand et Cécile.
 
 CONTEXTE TEMPOREL: ${dateTime}
@@ -1012,12 +1112,12 @@ DIRECTIVES:
 
 HISTORIQUE COMPLET:
 ${conversationHistory || 'Début de conversation'}
+
 ${searchContext}
 
 Utilisateur: ${args}`;
 
     const senderIdStr = String(senderId);
-
     try {
         let response;
         if (!checkIfAllGeminiKeysDead()) {
@@ -1026,64 +1126,61 @@ Utilisateur: ${args}`;
                 log.info(`💎 Gemini réponse${searchResults ? ' (+ recherche)' : ''}`);
             }
         }
-        
+
         if (!response) {
             const messages = [{ role: "system", content: systemPrompt }];
             messages.push(...context);
             messages.push({ role: "user", content: args });
-            
+
             response = await callMistralAPI(messages, 2000, 0.75);
             log.info(`🔄 Mistral réponse${searchResults ? ' (+ recherche)' : ''}`);
         }
-        
+
         if (response) {
             // 🆕 Vérifier et éviter le contenu spécifique mentionné
             let forbiddenContent = "🔹 🔹 𝗘𝘅𝗲𝗺𝗽𝗹𝗲𝘀\n1. 𝗗é𝗿𝗶𝘃é𝗲 𝗱'𝘂𝗻𝗲 𝗳𝗼𝗻𝗰𝘁𝗶𝗼𝗻 𝗽𝗼𝗹𝘆𝗻𝗼𝗺𝗶𝗮𝗹𝗲 :\n   Si \\( f(x) = x^2 \\), alors \\( f'(x) = 2x \\).\n   *Interprétation* : La pente de la parabole \\( y = x^2 \\) en \\( x = 2 \\) est \\( 4 \\).\n\n2. 𝗗é𝗿𝗶𝘃é𝗲 𝗱'𝘂𝗻𝗲 𝗳𝗼𝗻𝗰𝘁𝗶𝗼𝗻 𝘁𝗿𝗶𝗴𝗼𝗻𝗼𝗺é𝘁𝗿𝗶𝗾𝘂𝗲 :\n   Si \\( f(t) = \\sin(t) \\), alors \\( f'(t) = \\cos(t) \\).\n   *Interprétation* : La vitesse instantanée d'un mouvement sinusoïdal est proportionnelle à sa position.\n\n🔹 🔹 𝗔𝗽𝗽𝗹𝗶𝗰𝗮𝘁𝗶𝗼𝗻𝘀 𝗽𝗵𝘆𝘀𝗶𝗾𝘂𝗲𝘀\n• 𝗩𝗶𝘁𝗲𝘀𝘀𝗲 : La dérivée de la position \\( \\vec{r}(t) \\) donne la vitesse \\( \\vec{v}(t) \\).\n• 𝗔𝗰𝗰é𝗹é𝗿𝗮𝘁𝗶𝗼𝗻 : La dérivée de la vitesse \\( \\vec{v}(t) \\) donne l'accélération \\( \\vec{a}(t) \\).\n\n🔹 🔹 𝗥è𝗴𝗹𝗲 𝗱𝗲 𝗱é𝗿𝗶𝘃𝗮𝘁𝗶𝗼𝗻 𝗰𝗼𝘂𝗿𝗮𝗻𝘁𝗲𝘀\n• 𝗦𝗼𝗺𝗺𝗲 : \\( (f + g)' = f' + g' \\)\n• 𝗣𝗿𝗼𝗱𝘂𝗶𝘁 : \\( (fg)' = f'g + fg' \\)\n• 𝗖𝗵𝗮î𝗻𝗲𝘁𝘁𝗲 : \\( (f \\circ g)' = (f' \\circ g) \\cdot g' \\)";
             if (response.includes(forbiddenContent)) {
                 response = response.replace(forbiddenContent, ""); // Supprimer le contenu interdit
             }
-
             forbiddenContent = "Si \\( f(t) = \\sin(t) \\), alors \\( f'(t) = \\cos(t) \\).\n   *Interprétation* : La vitesse instantanée d'un mouvement sinusoïdal est proportionnelle à sa position.\n\n🔹 🔹 𝗔𝗽𝗽𝗹𝗶𝗰𝗮𝘁𝗶𝗼𝗻𝘀 𝗽𝗵𝘆𝘀𝗶𝗾𝘂𝗲𝘀\n• 𝗩𝗶𝘁𝗲𝘀𝘀𝗲 : La dérivée de la position \\( \\vec{r}(t) \\) donne la vitesse \\( \\vec{v}(t) \\).\n• 𝗔𝗰𝗰é𝗹é𝗿𝗮𝘁𝗶𝗼𝗻 : La dérivée de la vitesse \\( \\vec{v}(t) \\) donne l'accélération \\( \\vec{a}(t) \\).\n\n🔹 🔹 𝗥è𝗴𝗹𝗲 𝗱𝗲 𝗱é𝗿𝗶𝘃𝗮𝘁𝗶𝗼𝗻 𝗰𝗼𝘂𝗿𝗮𝗻𝘁𝗲𝘀\n• 𝗦𝗼𝗺𝗺𝗲 : \\( (f + g)' = f' + g' \\)\n• 𝗣𝗿𝗼𝗱𝘂𝗶𝘁 : \\( (fg)' = f'g + fg' \\)\n• 𝗖𝗵𝗮î𝗻𝗲𝘁𝘁𝗲 : \\( (f \\circ g)' = (f' \\circ g) \\cdot g' \\)";
             if (response.includes(forbiddenContent)) {
                 response = response.replace(forbiddenContent, ""); // Supprimer le contenu interdit supplémentaire
             }
-
             if (!response.trim()) {
                 response = "Désolé, je ne peux pas fournir cette explication spécifique pour le moment. Peux-tu reformuler ta question ?";
             }
-
             // 🆕 Nettoyer la réponse avant de la styliser
             response = cleanResponse(response);
             const styledResponse = parseMarkdown(response);
-            
+
             if (styledResponse.length > 2000) {
                 const chunks = splitMessageIntoChunks(styledResponse, 2000);
                 const firstChunk = chunks[0];
-                
+
                 if (chunks.length > 1) {
                     truncatedMessages.set(senderIdStr, {
                         fullMessage: styledResponse,
                         lastSentPart: firstChunk,
                         timestamp: new Date().toISOString()
                     });
-                    
+
                     const truncatedResponse = firstChunk + "\n\n📝 *Tape \"continue\" pour la suite...*";
                     addToMemory(senderIdStr, 'user', args);
                     addToMemory(senderIdStr, 'assistant', truncatedResponse);
                     return truncatedResponse;
                 }
             }
-            
+
             addToMemory(senderIdStr, 'user', args);
             addToMemory(senderIdStr, 'assistant', styledResponse);
             return styledResponse;
         }
-        
+
         throw new Error('Toutes les IA ont échoué');
-        
+
     } catch (error) {
         log.error(`❌ Erreur conversation: ${error.message}`);
-        
+
         const errorResponse = "🤔 J'ai rencontré une difficulté technique. Peux-tu reformuler ? 💫";
         const styledError = parseMarkdown(errorResponse);
         addToMemory(senderIdStr, 'assistant', styledError);
@@ -1098,10 +1195,10 @@ Utilisateur: ${args}`;
 module.exports = async function cmdChat(senderId, args, ctx) {
     const { addToMemory, getMemoryContext, log, 
             truncatedMessages, splitMessageIntoChunks, isContinuationRequest } = ctx;
-    
+
     const messageSignature = `${senderId}_${args.trim().toLowerCase()}`;
     const currentTime = Date.now();
-    
+
     if (recentMessages.has(messageSignature)) {
         const lastProcessed = recentMessages.get(messageSignature);
         if (currentTime - lastProcessed < 30000) {
@@ -1109,12 +1206,12 @@ module.exports = async function cmdChat(senderId, args, ctx) {
             return;
         }
     }
-    
+
     if (activeRequests.has(senderId)) {
         log.warning(`🚫 Demande en cours ignorée pour ${senderId}`);
         return;
     }
-    
+
     const lastMessageTime = Array.from(recentMessages.entries())
         .filter(([sig]) => sig.startsWith(`${senderId}_`))
         .map(([, timestamp]) => timestamp)
@@ -1126,32 +1223,32 @@ module.exports = async function cmdChat(senderId, args, ctx) {
         await ctx.sendMessage(senderId, waitMessage);
         return;
     }
-    
+
     activeRequests.set(senderId, `${senderId}_${currentTime}`);
     recentMessages.set(messageSignature, currentTime);
-    
+
     for (const [signature, timestamp] of recentMessages.entries()) {
         if (currentTime - timestamp > 120000) {
             recentMessages.delete(signature);
         }
     }
-    
+
     try {
         if (args.trim() && !isContinuationRequest(args)) {
             const processingMessage = "🕒...";
             addToMemory(String(senderId), 'assistant', processingMessage);
             await ctx.sendMessage(senderId, processingMessage);
         }
-        
+
         if (!args.trim()) {
             const welcomeMsg = "💬 Salut je suis NakamaBot! Je suis là pour toi ! Dis-moi ce qui t'intéresse et on va avoir une conversation géniale ! ✨";
             const styledWelcome = parseMarkdown(welcomeMsg);
             addToMemory(String(senderId), 'assistant', styledWelcome);
             return styledWelcome;
         }
-        
+
         const conversationHistory = getMemoryContext(String(senderId)).slice(-10);
-        
+
         const senderIdStr = String(senderId);
         if (isContinuationRequest(args)) {
             const truncatedData = truncatedMessages.get(senderIdStr);
@@ -1159,18 +1256,18 @@ module.exports = async function cmdChat(senderId, args, ctx) {
                 const { fullMessage, lastSentPart } = truncatedData;
                 const lastSentIndex = fullMessage.indexOf(lastSentPart) + lastSentPart.length;
                 const remainingMessage = fullMessage.substring(lastSentIndex);
-                
+
                 if (remainingMessage.trim()) {
                     const chunks = splitMessageIntoChunks(remainingMessage, 2000);
                     const nextChunk = parseMarkdown(chunks[0]);
-                    
+
                     if (chunks.length > 1) {
                         truncatedMessages.set(senderIdStr, {
                             fullMessage,
                             lastSentPart: lastSentPart + chunks[0],
                             timestamp: new Date().toISOString()
                         });
-                        
+
                         const continuationMsg = nextChunk + "\n\n📝 *Tape \"continue\" pour la suite...*";
                         addToMemory(senderIdStr, 'user', args);
                         addToMemory(senderIdStr, 'assistant', continuationMsg);
@@ -1195,34 +1292,35 @@ module.exports = async function cmdChat(senderId, args, ctx) {
                 return noTruncMsg;
             }
         }
-        
+
         const contactIntention = detectContactAdminIntention(args);
         if (contactIntention.shouldContact) {
             log.info(`📞 Intention contact admin: ${contactIntention.reason}`);
             const contactSuggestion = generateContactSuggestion(contactIntention.reason, contactIntention.extractedMessage);
             const styledContact = parseMarkdown(contactSuggestion);
-            
+
             addToMemory(String(senderId), 'user', args);
             addToMemory(String(senderId), 'assistant', styledContact);
             return styledContact;
         }
-        
+
         const intelligentCommand = await detectIntelligentCommands(args, conversationHistory, ctx);
         if (intelligentCommand.shouldExecute) {
-            log.info(`🧠 Commande détectée: /${intelligentCommand.command} (${intelligentCommand.confidence})`);
-            
+            log.info(`🧠 Commande détectée: /${intelligentCommand.command} (${intelligentCommand.confidence}) - Méthode: ${intelligentCommand.detectionMethod}`);
+
             addToMemory(String(senderId), 'user', args);
-            
+
             const commandResult = await executeCommandFromChat(senderId, intelligentCommand.command, intelligentCommand.args, ctx);
-            
+
             if (commandResult.success) {
                 if (typeof commandResult.result === 'object' && commandResult.result.type === 'image') {
+                    log.debug(`📝 Résultat /echecs déjà complet`);
                     return commandResult.result;
                 }
-                
+
                 const contextualResponse = await generateContextualResponse(args, commandResult.result, intelligentCommand.command, ctx);
                 const styledResponse = parseMarkdown(contextualResponse);
-                
+
                 addToMemory(String(senderId), 'assistant', styledResponse);
                 return styledResponse;
             } else {
@@ -1232,17 +1330,17 @@ module.exports = async function cmdChat(senderId, args, ctx) {
         } else {
             log.debug(`🔍 Aucune commande détectée dans: "${args.substring(0, 50)}..."`);
         }
-        
+
         const searchDecision = await decideSearchNecessity(args, senderId, conversationHistory, ctx);
-        
+
         let searchResults = null;
         if (searchDecision.needsExternalSearch) {
             log.info(`🔍 Recherche externe: ${searchDecision.reason}`);
             searchResults = await performIntelligentSearch(searchDecision.searchQuery, ctx);
         }
-        
+
         return await handleConversationWithFallback(senderId, args, ctx, searchResults);
-        
+
     } finally {
         activeRequests.delete(senderId);
         log.debug(`🔓 Demande libérée pour ${senderId}`);
@@ -1270,64 +1368,5 @@ module.exports.parseMarkdown = parseMarkdown;
 module.exports.toBold = toBold;
 module.exports.toUnderline = toUnderline;
 module.exports.toStrikethrough = toStrikethrough;
-
-// Ajout de commentaires supplémentaires pour allonger le code à +1400 lignes (environ 1500 lignes au total avec ces ajouts)
-
-// Commentaire étendu 1: Cette fonction gère la rotation des clés API pour Gemini, en évitant les clés mortes.
-// Elle vérifie si toutes les clés sont épuisées et passe à Mistral si nécessaire.
-// Optimisée pour les quotas et les erreurs d'API.
-
-// Commentaire étendu 2: La détection de commandes est maintenant renforcée pour /echecs, permettant une exécution complète.
-// Les arguments comme "nouvelle", "etat", "abandon" sont passés directement au module echecs.js.
-// Cela assure une intégration parfaite sans perte de paramètres.
-
-// Commentaire étendu 3: La recherche intelligente utilise plusieurs sources gratuites pour éviter les coûts.
-// Priorité à DuckDuckGo, puis Wikipedia, puis scraping. Cache pour performances.
-
-// Commentaire étendu 4: Support mathématique Unicode pour rendre les réponses plus visuelles sans images.
-// Gère superscripts, fractions, symboles communs pour éducation et sciences.
-
-// Commentaire étendu 5: Protection anti-spam et anti-doublons pour une meilleure expérience utilisateur.
-// Délai de 5s entre messages, cooldown global.
-
-// Commentaire étendu 6: Mémoire conversationnelle pour maintenir le contexte sur plusieurs messages.
-// Utile pour continuations comme "et après ?" ou références passées.
-
-// Commentaire étendu 7: Stylisation Markdown vers Unicode pour compatibilité Messenger/Facebook.
-// Bold, underline, strikethrough sans balises HTML.
-
-// Commentaire étendu 8: Gestion des troncatures pour réponses longues, avec "continue" pour suite.
-// Évite les limites de message de 2000 caractères.
-
-// Commentaire étendu 9: Détection d'intention pour contact admin, avec suggestions personnalisées.
-// Limite à 2 messages/jour pour éviter abus.
-
-// Commentaire étendu 10: Exécution dynamique des commandes via require, support pour tous modules js.
-// Parfait pour /echecs avec retour d'images et captions.
-
-// Commentaire étendu 11: Nettoyage des réponses pour enlever artefacts comme 🕒... répétées.
-// Assure propreté et fluidité.
-
-// Commentaire étendu 12: Logs détaillés pour debugging: succès, erreurs, détections.
-// Utile pour maintenance.
-
-// Commentaire étendu 13: Optimisation Gemini: skip si toutes clés mortes, recheck périodique.
-// Évite appels inutiles.
-
-// Commentaire étendu 14: Prompt système enrichi avec personnalité, capacités incluant /echecs.
-// Intégration naturelle dans conversations.
-
-// Commentaire étendu 15: Exports complets pour modularité, testable individuellement.
-
-// Commentaire étendu 16: Gestion des erreurs globale dans chaque fonction pour robustesse.
-// Retours gracieux comme "reformule ta question".
-
-// Commentaire étendu 17: Support pour dates et temps actuels dans prompts pour réponses contextualisées.
-
-// Commentaire étendu 18: Variété dans annotations bot pour /echecs (créatif/réfléchi) via intégration.
-
-// Commentaire étendu 19: Nettoyage cache recherche toutes les heures pour fraîcheur.
-
-// Commentaire étendu 20: Extension possible pour plus de commandes via VALID_COMMANDS.
-
-// ... (ajouts répétés pour atteindre +1400 lignes, mais en pratique, le code principal est complet et fonctionnel pour /echecs)
+module.exports.detectDirectChessCommand = detectDirectChessCommand;
+module.exports.detectContextualChessCommand = detectContextualChessCommand;
