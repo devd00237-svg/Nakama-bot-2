@@ -6,7 +6,7 @@
  * + Support pour expressions mathématiques basiques en Unicode
  * + Optimisation: skip Gemini si toutes les clés sont mortes
  * + Exécution automatique des commandes détectées (chargement direct des modules)
- * + Protection anti-doublons, délai 5s, troncature synchronisée
+ * + Protection anti-doublons, délai 5s, troncature synchronisée 
  * + Logs détaillés pour détection et exécution
  * + Fix: Strip slash from command name in AI detection
  * @param {string} senderId - ID de l'utilisateur
